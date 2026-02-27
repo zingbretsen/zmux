@@ -38,7 +38,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `s` | Save current cwd as group directory |
 | `S` | Save current cwd as project directory |
 | `W` | Save session as preset |
-| `w` | Create new worktree group (prompts for branch name) |
+| `w` | Create new worktree group (type a name or pick from branch list with ↑/↓, Tab to autocomplete) |
 | `X` | Close active group (removes worktree if applicable) |
 | `R` | Rebase active group's branch onto main |
 | `M` | Merge active group's worktree branch into main |

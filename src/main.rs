@@ -304,6 +304,9 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         // Worktree: new group from branch
         KeyCode::Char('w') => {
             app.rename_buf.clear();
+            app.branch_candidates.clear();
+            app.branch_selected = None;
+            app.conn.list_branches().await?;
             app.mode = Mode::BranchInput;
         }
 
@@ -416,20 +419,59 @@ async fn handle_branch_input_key(app: &mut App, key: &crossterm::event::KeyEvent
     match key.code {
         KeyCode::Esc => {
             app.rename_buf.clear();
+            app.branch_candidates.clear();
+            app.branch_selected = None;
             app.mode = Mode::Nav;
         }
         KeyCode::Enter => {
-            if !app.rename_buf.is_empty() {
-                app.conn.new_worktree_group(app.rename_buf.clone()).await?;
+            // Use selected branch if one is highlighted, otherwise use typed text
+            let branch = if let Some(idx) = app.branch_selected {
+                let filtered = app.filtered_branches();
+                filtered.get(idx).map(|s| s.to_string())
+            } else {
+                None
+            };
+            let branch = branch.unwrap_or_else(|| app.rename_buf.clone());
+            if !branch.is_empty() {
+                app.conn.new_worktree_group(branch).await?;
             }
             app.rename_buf.clear();
+            app.branch_candidates.clear();
+            app.branch_selected = None;
             app.mode = Mode::Normal;
+        }
+        KeyCode::Down => {
+            let count = app.filtered_branches().len();
+            if count > 0 {
+                app.branch_selected = Some(match app.branch_selected {
+                    None => 0,
+                    Some(i) => (i + 1).min(count - 1),
+                });
+            }
+        }
+        KeyCode::Up => {
+            app.branch_selected = match app.branch_selected {
+                None | Some(0) => None,
+                Some(i) => Some(i - 1),
+            };
+        }
+        KeyCode::Tab => {
+            // Autocomplete: fill input with selected branch
+            if let Some(idx) = app.branch_selected {
+                let filtered = app.filtered_branches();
+                if let Some(name) = filtered.get(idx) {
+                    app.rename_buf = name.to_string();
+                    app.branch_selected = None;
+                }
+            }
         }
         KeyCode::Backspace => {
             app.rename_buf.pop();
+            app.branch_selected = None;
         }
         KeyCode::Char(c) => {
             app.rename_buf.push(c);
+            app.branch_selected = None;
         }
         _ => {}
     }

@@ -125,6 +125,10 @@ impl ClientConnection {
         self.send(ClientMsg::NewWorktreeGroup { branch }).await
     }
 
+    pub async fn list_branches(&self) -> Result<()> {
+        self.send(ClientMsg::ListBranches).await
+    }
+
     pub async fn close_group(&self, force: bool) -> Result<()> {
         self.send(ClientMsg::CloseGroup { force }).await
     }

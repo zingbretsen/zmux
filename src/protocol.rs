@@ -83,6 +83,8 @@ pub enum ClientMsg {
     MoveWindowToNewGroup,
     /// Create a new group with an associated git worktree
     NewWorktreeGroup { branch: String },
+    /// Request list of git branches for the active project
+    ListBranches,
     /// Remove the active group's worktree and delete the group
     CloseGroup { force: bool },
     /// Rename a node (project, group, or window)
@@ -134,6 +136,8 @@ pub enum ServerMsg {
     Info { message: String },
     /// Window was created
     WindowCreated { id: NodeId, name: String, group_id: NodeId },
+    /// List of git branches for branch picker
+    BranchList { branches: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

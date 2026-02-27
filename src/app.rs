@@ -60,6 +60,10 @@ pub struct App {
 
     // Status message shown briefly in the tab bar
     pub status_message: Option<(String, Instant)>,
+
+    // Branch picker state
+    pub branch_candidates: Vec<String>,
+    pub branch_selected: Option<usize>,
 }
 
 impl App {
@@ -89,6 +93,8 @@ impl App {
             rename_target: None,
             copy_scroll_offset: 0,
             status_message: None,
+            branch_candidates: Vec::new(),
+            branch_selected: None,
         })
     }
 
@@ -133,6 +139,10 @@ impl App {
             }
             ServerMsg::Info { message } => {
                 self.status_message = Some((message, Instant::now()));
+            }
+            ServerMsg::BranchList { branches } => {
+                self.branch_candidates = branches;
+                self.branch_selected = None;
             }
             ServerMsg::WindowCreated { .. } => {}
             ServerMsg::Error { message } => {
@@ -222,6 +232,16 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Get branch candidates filtered by current input.
+    pub fn filtered_branches(&self) -> Vec<&str> {
+        let query = self.rename_buf.to_lowercase();
+        self.branch_candidates
+            .iter()
+            .filter(|b| query.is_empty() || b.to_lowercase().contains(&query))
+            .map(|b| b.as_str())
+            .collect()
     }
 
     pub async fn select_tab_by_index(&mut self, index: usize) -> Result<()> {

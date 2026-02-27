@@ -85,6 +85,22 @@ pub fn remove(project_dir: &Path, wt_path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// List all local git branches in the repository.
+pub fn list_branches(project_dir: &Path) -> Vec<String> {
+    Command::new("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .current_dir(project_dir)
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// List existing worktree branches under .worktrees/
 pub fn list_worktrees(project_dir: &Path) -> Vec<String> {
     let worktrees_dir = project_dir.join(".worktrees");

@@ -1338,6 +1338,16 @@ async fn handle_client(
                     }
                 }
             }
+            ClientMsg::ListBranches => {
+                if let Some(project_id) = st.session.active_project {
+                    let project_dir = match st.session.nodes.get(&project_id) {
+                        Some(Node::Project(p)) => p.working_dir.clone(),
+                        _ => continue,
+                    };
+                    let branches = worktree::list_branches(&project_dir);
+                    let _ = client_tx.send(ServerMsg::BranchList { branches });
+                }
+            }
             ClientMsg::CloseGroup { force } => {
                 if let Some(group_id) = st.session.active_group {
                     // Check for dirty worktree

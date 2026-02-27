@@ -37,6 +37,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::Help) {
         draw_help(f, area);
     }
+    if matches!(app.mode, Mode::BranchInput) {
+        draw_branch_picker(f, app, area);
+    }
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
@@ -79,6 +82,64 @@ fn draw_help(f: &mut Frame, area: Rect) {
         .block(block)
         .style(Style::default().fg(Color::White));
     f.render_widget(para, popup);
+}
+
+fn draw_branch_picker(f: &mut Frame, app: &App, area: Rect) {
+    let filtered = app.filtered_branches();
+    if filtered.is_empty() {
+        return;
+    }
+
+    let max_visible = 10usize;
+    let visible_count = filtered.len().min(max_visible);
+    let height = (visible_count as u16 + 2).min(area.height); // +2 for borders
+    let width = filtered.iter().map(|b| b.len()).max().unwrap_or(10).max(20) as u16 + 4; // padding
+    let width = width.min(area.width);
+
+    // Position below the tab bar
+    let x = area.x + 1;
+    let y = area.y + 1; // just below tab bar
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Branches ");
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    // Scroll offset to keep selection visible
+    let scroll_offset = if let Some(sel) = app.branch_selected {
+        if sel >= max_visible {
+            sel - max_visible + 1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = filtered
+        .iter()
+        .skip(scroll_offset)
+        .take(max_visible)
+        .enumerate()
+        .map(|(i, name)| {
+            let actual_idx = i + scroll_offset;
+            let is_selected = app.branch_selected == Some(actual_idx);
+            let style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Yellow).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(format!(" {} ", name), style))
+        })
+        .collect();
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
 }
 
 fn draw_tiled(f: &mut Frame, app: &App, area: Rect) {
@@ -212,6 +273,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     if matches!(app.mode, Mode::BranchInput) {
+        // Tab bar shows input; popup drawn separately
         let line = Line::from(vec![
             Span::styled(" branch: ", Style::default().fg(Color::Yellow).bold()),
             Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
