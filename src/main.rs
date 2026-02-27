@@ -166,6 +166,10 @@ async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<(
         Mode::AiNav => handle_ai_nav_key(app, key).await,
         Mode::Rename => handle_rename_key(app, key).await,
         Mode::BranchInput => handle_branch_input_key(app, key).await,
+        Mode::Help => {
+            app.mode = Mode::Normal;
+            Ok(())
+        }
     }
 }
 
@@ -278,10 +282,27 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::BranchInput;
         }
 
+        // Rebase onto main
+        KeyCode::Char('R') => {
+            app.conn.rebase_main().await?;
+            app.mode = Mode::Normal;
+        }
+
+        // Merge worktree branch into main
+        KeyCode::Char('M') => {
+            app.conn.merge_into_main().await?;
+            app.mode = Mode::Normal;
+        }
+
         // Close group (with worktree cleanup)
         KeyCode::Char('X') => {
             app.conn.close_group(false).await?;
             app.mode = Mode::Normal;
+        }
+
+        // Help
+        KeyCode::Char('?') => {
+            app.mode = Mode::Help;
         }
 
         _ => {}

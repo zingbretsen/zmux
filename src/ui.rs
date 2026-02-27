@@ -1,6 +1,6 @@
 use crate::app::{App, Mode, TabLevel};
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::time::Duration;
 use tui_term::widget::PseudoTerminal;
 
@@ -17,6 +17,49 @@ pub fn draw(f: &mut Frame, app: &App) {
     let parser = app.parser.lock().unwrap();
     let pseudo_term = PseudoTerminal::new(parser.screen());
     f.render_widget(pseudo_term, chunks[1]);
+
+    if matches!(app.mode, Mode::Help) {
+        draw_help(f, area);
+    }
+}
+
+fn draw_help(f: &mut Frame, area: Rect) {
+    let help_text = "\
+ Ctrl+B  Enter nav mode    Ctrl+Q  Quit
+
+ Nav Mode:
+ h/l     Prev/next tab     j/k     Change level
+ 1-9     Select tab         Esc     Exit nav mode
+ c       New window         x       Close window
+ g       Window → new group p       Window → new project
+ r       Rename             ?       This help
+ a       AI nav mode
+ s       Set group dir      S       Set project dir
+ W       Save preset
+ w       New worktree group X       Close group
+ R       Rebase onto main   M       Merge into main
+ d       Detach
+
+ AI Nav: h/l to cycle, Esc to exit
+
+ Press any key to close";
+
+    let lines: Vec<&str> = help_text.lines().collect();
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let width = 54u16.min(area.width);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Keybindings ");
+    let para = Paragraph::new(help_text)
+        .block(block)
+        .style(Style::default().fg(Color::White));
+    f.render_widget(para, popup);
 }
 
 fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {

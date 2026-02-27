@@ -113,6 +113,14 @@ impl ClientConnection {
         self.send(ClientMsg::CloseWindow).await
     }
 
+    pub async fn rebase_main(&self) -> Result<()> {
+        self.send(ClientMsg::RebaseMain).await
+    }
+
+    pub async fn merge_into_main(&self) -> Result<()> {
+        self.send(ClientMsg::MergeIntoMain).await
+    }
+
     pub async fn new_worktree_group(&self, branch: String) -> Result<()> {
         self.send(ClientMsg::NewWorktreeGroup { branch }).await
     }

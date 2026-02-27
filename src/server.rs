@@ -42,6 +42,7 @@ struct WindowNode {
     parent: NodeId,
     pty: PtyHandle,
     ai_status: Option<AiStatus>,
+    last_cpu_time: u64,
 }
 
 enum Node {
@@ -130,7 +131,7 @@ impl SessionTree {
             let _ = pty_output_tx.send((win_id, Vec::new()));
         });
 
-        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty, ai_status: None }));
+        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty, ai_status: None, last_cpu_time: 0 }));
         if let Some(Node::Group(g)) = self.nodes.get_mut(&parent) {
             g.children.push(id);
         }
@@ -338,11 +339,12 @@ impl SessionTree {
                     Some(p) => p,
                     None => continue,
                 };
-                let new_status = ai_detect::detect(pid, w.ai_status.as_ref());
+                let (new_status, new_cpu_time) = ai_detect::detect(pid, w.ai_status.as_ref(), w.last_cpu_time);
                 if new_status != w.ai_status {
                     w.ai_status = new_status;
                     changed = true;
                 }
+                w.last_cpu_time = new_cpu_time;
             }
         }
         changed
@@ -945,6 +947,82 @@ async fn handle_client(
                         if let Some(data) = st.session.screen_dump(new_wid) {
                             let _ = client_tx.send(ServerMsg::ScreenDump { window_id: new_wid, data });
                         }
+                    }
+                }
+            }
+            ClientMsg::RebaseMain => {
+                if let Some(gid) = st.session.active_group {
+                    let working_dir = st.session.window_working_dir(gid);
+                    let output = std::process::Command::new("git")
+                        .args(["rebase", "main"])
+                        .current_dir(&working_dir)
+                        .output();
+                    match output {
+                        Ok(o) if o.status.success() => {
+                            let stdout = String::from_utf8_lossy(&o.stdout);
+                            let msg = stdout.trim();
+                            let _ = client_tx.send(ServerMsg::Info {
+                                message: if msg.is_empty() { "Rebase complete".to_string() } else { msg.to_string() },
+                            });
+                        }
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            let _ = client_tx.send(ServerMsg::Error {
+                                message: format!("Rebase failed: {}", stderr.trim()),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = client_tx.send(ServerMsg::Error {
+                                message: format!("Failed to run git: {}", e),
+                            });
+                        }
+                    }
+                }
+            }
+            ClientMsg::MergeIntoMain => {
+                let (project_dir, branch) = if let Some(gid) = st.session.active_group {
+                    match st.session.nodes.get(&gid) {
+                        Some(Node::Group(g)) => {
+                            let branch = g.worktree_path.as_ref()
+                                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+                            let proj_dir = if let Some(Node::Project(p)) = st.session.nodes.get(&g.parent) {
+                                Some(p.working_dir.clone())
+                            } else { None };
+                            (proj_dir, branch)
+                        }
+                        _ => (None, None),
+                    }
+                } else { (None, None) };
+
+                match (project_dir, branch) {
+                    (Some(dir), Some(branch)) => {
+                        let output = std::process::Command::new("git")
+                            .args(["merge", &branch])
+                            .current_dir(&dir)
+                            .output();
+                        match output {
+                            Ok(o) if o.status.success() => {
+                                let _ = client_tx.send(ServerMsg::Info {
+                                    message: format!("Merged {} into main", branch),
+                                });
+                            }
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                let _ = client_tx.send(ServerMsg::Error {
+                                    message: format!("Merge failed: {}", stderr.trim()),
+                                });
+                            }
+                            Err(e) => {
+                                let _ = client_tx.send(ServerMsg::Error {
+                                    message: format!("Failed to run git: {}", e),
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = client_tx.send(ServerMsg::Error {
+                            message: "Not a worktree group".to_string(),
+                        });
                     }
                 }
             }

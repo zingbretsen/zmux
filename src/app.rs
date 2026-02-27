@@ -11,6 +11,7 @@ pub enum Mode {
     AiNav,
     Rename,
     BranchInput,
+    Help,
 }
 
 #[derive(Clone, Copy, PartialEq)]

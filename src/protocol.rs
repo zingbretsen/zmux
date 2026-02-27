@@ -45,6 +45,10 @@ pub enum ClientMsg {
     CloseGroup { force: bool },
     /// Rename a node (project, group, or window)
     Rename { id: NodeId, name: String },
+    /// Rebase active group's branch onto main
+    RebaseMain,
+    /// Merge active group's worktree branch into main
+    MergeIntoMain,
     /// Close the active window
     CloseWindow,
     /// Shut down the server

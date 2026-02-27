@@ -37,63 +37,82 @@ impl AiStatus {
 }
 
 /// Detect AI tool processes among descendants of the given PID.
-/// Returns the "most interesting" status (Running > Idle > Finished).
-pub fn detect(child_pid: u32, prev_status: Option<&AiStatus>) -> Option<AiStatus> {
+/// Uses CPU time delta to determine Running vs Idle:
+/// - If total CPU time (utime+stime) across the AI tool's subtree increased since
+///   last poll, it's Running. Otherwise it's Idle.
+/// Returns (status, current_cpu_time) where cpu_time can be stored for next poll.
+pub fn detect(child_pid: u32, prev_status: Option<&AiStatus>, prev_cpu_time: u64) -> (Option<AiStatus>, u64) {
     let descendants = get_descendant_pids(child_pid);
 
-    let mut best: Option<AiStatus> = None;
-
+    // Find the AI tool process among descendants
+    let mut ai_pid: Option<(u32, &str)> = None;
     for pid in &descendants {
         let comm = match read_comm(*pid) {
             Some(c) => c,
             None => continue,
         };
-
         for &(pattern, display_name) in AI_TOOLS {
             if comm.contains(pattern) {
-                let state = read_process_state(*pid);
-                let status = match state {
-                    Some('R') => AiStatus::Running {
-                        tool: display_name.to_string(),
-                        pid: *pid,
-                    },
-                    _ => AiStatus::Idle {
-                        tool: display_name.to_string(),
-                        pid: *pid,
-                    },
-                };
-                // Prefer Running over Idle
-                match (&best, &status) {
-                    (None, _) => best = Some(status),
-                    (Some(AiStatus::Idle { .. }), AiStatus::Running { .. }) => {
-                        best = Some(status)
+                ai_pid = Some((*pid, display_name));
+                break;
+            }
+        }
+        if ai_pid.is_some() {
+            break;
+        }
+    }
+
+    let (tool_pid, tool_name) = match ai_pid {
+        Some(v) => v,
+        None => {
+            // No AI tool found — check if one was previously running
+            if let Some(prev) = prev_status {
+                match prev {
+                    AiStatus::Running { tool, .. } | AiStatus::Idle { tool, .. } => {
+                        return (Some(AiStatus::Finished { tool: tool.clone() }), 0);
                     }
-                    _ => {}
+                    AiStatus::Finished { .. } => return (Some(prev.clone()), 0),
                 }
             }
+            return (None, 0);
         }
+    };
+
+    // Sum CPU time across the AI tool and all its descendants
+    let ai_descendants = get_descendant_pids(tool_pid);
+    let mut total_cpu: u64 = read_cpu_time(tool_pid).unwrap_or(0);
+    for pid in &ai_descendants {
+        total_cpu += read_cpu_time(*pid).unwrap_or(0);
     }
 
-    // If we had a previous AI status but the process is gone, mark as Finished
-    if best.is_none() {
-        if let Some(prev) = prev_status {
-            match prev {
-                AiStatus::Running { tool, .. } | AiStatus::Idle { tool, .. } => {
-                    return Some(AiStatus::Finished {
-                        tool: tool.clone(),
-                    });
-                }
-                AiStatus::Finished { .. } => return Some(prev.clone()),
-            }
+    let status = if total_cpu > prev_cpu_time && prev_cpu_time > 0 {
+        AiStatus::Running {
+            tool: tool_name.to_string(),
+            pid: tool_pid,
         }
-    }
+    } else {
+        AiStatus::Idle {
+            tool: tool_name.to_string(),
+            pid: tool_pid,
+        }
+    };
 
-    best
+    (Some(status), total_cpu)
+}
+
+/// Read utime + stime from /proc/{pid}/stat
+fn read_cpu_time(pid: u32) -> Option<u64> {
+    let content = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let after_comm = content.rsplit_once(')')?.1;
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    // fields[0]=state, [1]=ppid, ..., [11]=utime, [12]=stime (0-indexed after comm)
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    Some(utime + stime)
 }
 
 /// Get all descendant PIDs of a process by walking /proc
 fn get_descendant_pids(root_pid: u32) -> Vec<u32> {
-    // Build parent->children map from /proc
     let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
 
     let proc_dir = match fs::read_dir("/proc") {
@@ -115,7 +134,6 @@ fn get_descendant_pids(root_pid: u32) -> Vec<u32> {
         }
     }
 
-    // BFS from root_pid
     let mut result = Vec::new();
     let mut queue = vec![root_pid];
     while let Some(pid) = queue.pop() {
@@ -136,24 +154,10 @@ fn read_comm(pid: u32) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Read process state character (R, S, D, Z, T, etc.)
-fn read_process_state(pid: u32) -> Option<char> {
-    let status = fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("State:") {
-            return rest.trim().chars().next();
-        }
-    }
-    None
-}
-
 /// Read PPID from /proc/{pid}/stat
 fn read_ppid(stat_path: &str) -> Option<u32> {
     let content = fs::read_to_string(stat_path).ok()?;
-    // Format: pid (comm) state ppid ...
-    // comm can contain spaces and parens, so find last ')' then parse
     let after_comm = content.rsplit_once(')')?.1;
     let fields: Vec<&str> = after_comm.split_whitespace().collect();
-    // fields[0] = state, fields[1] = ppid
     fields.get(1)?.parse().ok()
 }
