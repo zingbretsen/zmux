@@ -91,14 +91,8 @@ Ongoing improvements to make zmux a daily driver.
 - PTY state is lost (processes are gone), but new shells spawn in the right directories
 
 ### Window Management
-- Rename windows/groups/projects from nav mode
 - Close/delete windows, groups, and projects
 - Startup commands per window from presets (`command = "cargo watch"`)
-
-### Multiple Server Instances
-- Named servers: `zmux --session work` vs `zmux --session personal`
-- `zmux list-sessions` to see running servers
-- Separate socket per session
 
 ### UX
 - Mouse click on tab bar to switch tabs
