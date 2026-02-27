@@ -9,6 +9,7 @@ pub enum Mode {
     Normal,
     Nav,
     Copy,
+    Search,
     AiNav,
     Rename,
     BranchInput,

@@ -41,6 +41,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `X` | Close active group (removes worktree if applicable) |
 | `R` | Rebase active group's branch onto main |
 | `M` | Merge active group's worktree branch into main |
+| `/` | Search across all windows for text |
 | `[` | Enter copy (scroll) mode |
 
 ### Copy Mode

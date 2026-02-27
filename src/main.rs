@@ -166,6 +166,7 @@ async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<(
         Mode::AiNav => handle_ai_nav_key(app, key).await,
         Mode::Rename => handle_rename_key(app, key).await,
         Mode::Copy => handle_copy_key(app, key).await,
+        Mode::Search => handle_search_key(app, key).await,
         Mode::BranchInput => handle_branch_input_key(app, key).await,
         Mode::Help => {
             app.mode = Mode::Normal;
@@ -295,6 +296,12 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Normal;
         }
 
+        // Search across windows
+        KeyCode::Char('/') => {
+            app.rename_buf.clear();
+            app.mode = Mode::Search;
+        }
+
         // Enter copy mode
         KeyCode::Char('[') => {
             app.copy_scroll_offset = 0;
@@ -371,6 +378,30 @@ async fn handle_branch_input_key(app: &mut App, key: &crossterm::event::KeyEvent
         KeyCode::Enter => {
             if !app.rename_buf.is_empty() {
                 app.conn.new_worktree_group(app.rename_buf.clone()).await?;
+            }
+            app.rename_buf.clear();
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.rename_buf.pop();
+        }
+        KeyCode::Char(c) => {
+            app.rename_buf.push(c);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_search_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.rename_buf.clear();
+            app.mode = Mode::Nav;
+        }
+        KeyCode::Enter => {
+            if !app.rename_buf.is_empty() {
+                app.conn.search_windows(app.rename_buf.clone()).await?;
             }
             app.rename_buf.clear();
             app.mode = Mode::Normal;

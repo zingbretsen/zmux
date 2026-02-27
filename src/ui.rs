@@ -78,6 +78,14 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(line), area);
         return;
     }
+    if matches!(app.mode, Mode::Search) {
+        let line = Line::from(vec![
+            Span::styled(" search: ", Style::default().fg(Color::Magenta).bold()),
+            Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
     if matches!(app.mode, Mode::BranchInput) {
         let line = Line::from(vec![
             Span::styled(" branch: ", Style::default().fg(Color::Yellow).bold()),
