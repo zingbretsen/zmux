@@ -10,6 +10,7 @@ mod worktree;
 
 use anyhow::Result;
 use app::{App, Mode, TabLevel};
+use protocol::PaneDirection;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
@@ -183,8 +184,30 @@ async fn handle_normal_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
         return Ok(());
     }
 
+    // Pane focus navigation in tiled mode
+    if app.is_tiled() && ctrl {
+        let dir = match key.code {
+            KeyCode::Char('h') => Some(PaneDirection::Left),
+            KeyCode::Char('j') => Some(PaneDirection::Down),
+            KeyCode::Char('k') => Some(PaneDirection::Up),
+            KeyCode::Char('l') => Some(PaneDirection::Right),
+            _ => None,
+        };
+        if let Some(direction) = dir {
+            app.conn.focus_pane(direction).await?;
+            return Ok(());
+        }
+    }
+
     if let Some(bytes) = key_to_bytes(key) {
-        app.conn.send_input(bytes).await?;
+        if app.is_tiled() {
+            // In tiled mode, send input to the active (focused) window
+            if let Some(wid) = app.active_window {
+                app.conn.send_input_to_window(wid, bytes).await?;
+            }
+        } else {
+            app.conn.send_input(bytes).await?;
+        }
     }
     Ok(())
 }
@@ -319,6 +342,26 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Help;
         }
 
+        // Toggle layout mode (Stacked ↔ Tiled)
+        KeyCode::Char('t') => {
+            app.conn.toggle_layout().await?;
+            app.mode = Mode::Normal;
+        }
+
+        // Cycle tile layout algorithm
+        KeyCode::Char('T') => {
+            app.conn.cycle_layout().await?;
+            app.mode = Mode::Normal;
+        }
+
+        // Toggle current window in/out of tile set
+        KeyCode::Char('m') => {
+            if let Some(wid) = app.active_window {
+                app.conn.toggle_tile(wid).await?;
+            }
+            app.mode = Mode::Normal;
+        }
+
         _ => {}
     }
     Ok(())
@@ -421,35 +464,43 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let half_page = (app.last_size.1 / 2) as usize;
 
+    let set_scrollback = |app: &mut App, offset: usize| {
+        if let Some(wid) = app.active_window {
+            if let Some(parser) = app.parser_for(wid) {
+                parser.lock().unwrap().set_scrollback(offset);
+            }
+        }
+    };
+
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
             app.copy_scroll_offset = 0;
-            app.parser.lock().unwrap().set_scrollback(0);
+            set_scrollback(app, 0);
             app.mode = Mode::Normal;
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(1).min(1000);
-            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+            set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('j') | KeyCode::Down => {
             app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(1);
-            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+            set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('u') if ctrl => {
             app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(half_page).min(1000);
-            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+            set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('d') if ctrl => {
             app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(half_page);
-            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+            set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('g') => {
             app.copy_scroll_offset = 1000;
-            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+            set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('G') => {
             app.copy_scroll_offset = 0;
-            app.parser.lock().unwrap().set_scrollback(0);
+            set_scrollback(app, 0);
         }
         _ => {}
     }

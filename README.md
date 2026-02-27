@@ -16,6 +16,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 |-----|--------|
 | `Ctrl+B` | Enter nav mode |
 | `Ctrl+Q` | Quit |
+| `Ctrl+H/J/K/L` | Move focus between panes (tiled mode only) |
 
 ### Nav Mode
 
@@ -43,6 +44,10 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `M` | Merge active group's worktree branch into main |
 | `/` | Search across all windows for text |
 | `[` | Enter copy (scroll) mode |
+| `t` | Toggle layout mode (Stacked ↔ Tiled) |
+| `T` | Cycle tile layout (columns → rows → main-left → grid) |
+| `m` | Toggle current window in/out of tile set |
+| `?` | Show help overlay |
 
 ### Copy Mode
 
@@ -102,6 +107,7 @@ name = "shell"
 - **Hierarchical sessions**: Projects > Groups > Windows
 - **AI awareness**: Detects claude, codex, aider, copilot processes and shows status indicators
 - **Git worktree integration**: Create groups backed by git worktrees, rebase/merge from within zmux
+- **Tiling layouts**: i3-style tiled mode with columns, rows, main-left, and grid layouts
 - **Presets**: Save and restore session trees as TOML
 - **.env support**: Auto-injects `.env` variables into new windows based on project/group directory
 - **Client-server architecture**: Sessions persist across disconnects

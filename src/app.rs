@@ -1,6 +1,7 @@
 use crate::client::ClientConnection;
-use crate::protocol::{NodeId, ServerMsg, TabEntry};
+use crate::protocol::{LayoutMode, NodeId, ServerMsg, TabEntry, TileLayout};
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -39,8 +40,16 @@ pub struct App {
     pub active_group: Option<NodeId>,
     pub active_window: Option<NodeId>,
 
-    // Client-side vt100 parser for the active window
-    pub parser: Arc<Mutex<vt100::Parser>>,
+    // Layout state
+    pub layout_mode: LayoutMode,
+    pub tile_layout: TileLayout,
+    pub tiled_windows: Vec<NodeId>,
+
+    // Client-side vt100 parsers keyed by window ID
+    pub parsers: HashMap<NodeId, Arc<Mutex<vt100::Parser>>>,
+    /// Default terminal size for creating new parsers
+    pub term_rows: u16,
+    pub term_cols: u16,
 
     // Rename input buffer
     pub rename_buf: String,
@@ -56,6 +65,7 @@ pub struct App {
 impl App {
     pub async fn new(conn: ClientConnection, rows: u16, cols: u16) -> Result<Self> {
         conn.send_resize(cols, rows).await?;
+        let term_rows = rows.saturating_sub(1);
         Ok(App {
             conn,
             should_quit: false,
@@ -69,7 +79,12 @@ impl App {
             active_project: None,
             active_group: None,
             active_window: None,
-            parser: Arc::new(Mutex::new(vt100::Parser::new(rows.saturating_sub(1), cols, 1000))),
+            layout_mode: LayoutMode::Stacked,
+            tile_layout: TileLayout::EqualColumns,
+            tiled_windows: Vec::new(),
+            parsers: HashMap::new(),
+            term_rows,
+            term_cols: cols,
             rename_buf: String::new(),
             rename_target: None,
             copy_scroll_offset: 0,
@@ -77,24 +92,44 @@ impl App {
         })
     }
 
+    /// Get or create a parser for a window
+    pub fn get_parser(&mut self, window_id: NodeId) -> Arc<Mutex<vt100::Parser>> {
+        self.parsers.entry(window_id).or_insert_with(|| {
+            Arc::new(Mutex::new(vt100::Parser::new(self.term_rows, self.term_cols, 1000)))
+        }).clone()
+    }
+
+    /// Get parser without creating (for rendering)
+    pub fn parser_for(&self, window_id: NodeId) -> Option<Arc<Mutex<vt100::Parser>>> {
+        self.parsers.get(&window_id).cloned()
+    }
+
     pub fn apply_server_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::TabState { projects, groups, windows, active_project, active_group, active_window } => {
+            ServerMsg::TabState { projects, groups, windows, active_project, active_group, active_window, layout_mode, tile_layout, tiled_windows } => {
                 self.projects = projects;
                 self.groups = groups;
                 self.windows = windows;
                 self.active_project = active_project;
                 self.active_group = active_group;
                 self.active_window = active_window;
+                self.layout_mode = layout_mode;
+                self.tile_layout = tile_layout;
+                self.tiled_windows = tiled_windows;
+
+                // Clean up parsers for windows that no longer exist
+                let window_ids: Vec<NodeId> = self.windows.iter().map(|e| e.id).collect();
+                self.parsers.retain(|id, _| window_ids.contains(id));
             }
-            ServerMsg::ScreenDump { window_id: _, data } => {
-                let mut parser = self.parser.lock().unwrap();
-                // Clear and process the screen dump
+            ServerMsg::ScreenDump { window_id, data } => {
+                let parser = self.get_parser(window_id);
+                let mut parser = parser.lock().unwrap();
                 parser.process(b"\x1b[2J\x1b[H");
                 parser.process(&data);
             }
-            ServerMsg::PtyOutput { window_id: _, data } => {
-                self.parser.lock().unwrap().process(&data);
+            ServerMsg::PtyOutput { window_id, data } => {
+                let parser = self.get_parser(window_id);
+                parser.lock().unwrap().process(&data);
             }
             ServerMsg::Info { message } => {
                 self.status_message = Some((message, Instant::now()));
@@ -109,13 +144,22 @@ impl App {
     pub async fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         if self.last_size != (cols, rows) {
             self.last_size = (cols, rows);
-            self.parser.lock().unwrap().set_size(rows.saturating_sub(1), cols);
+            self.term_rows = rows.saturating_sub(1);
+            self.term_cols = cols;
+            // Resize all existing parsers
+            for parser in self.parsers.values() {
+                parser.lock().unwrap().set_size(self.term_rows, cols);
+            }
             self.conn.send_resize(cols, rows).await?;
         }
         Ok(())
     }
 
-    // Tab navigation helpers (client-side, send commands to server)
+    pub fn is_tiled(&self) -> bool {
+        self.layout_mode == LayoutMode::Tiled && !self.tiled_windows.is_empty()
+    }
+
+    // Tab navigation helpers
 
     pub async fn next_tab(&mut self) -> Result<()> {
         match self.tab_focus {

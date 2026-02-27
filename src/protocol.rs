@@ -2,6 +2,48 @@ use serde::{Deserialize, Serialize};
 
 pub type NodeId = u64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayoutMode {
+    Stacked,
+    Tiled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TileLayout {
+    EqualColumns,
+    EqualRows,
+    MainLeft,
+    Grid,
+}
+
+impl TileLayout {
+    pub fn next(self) -> Self {
+        match self {
+            TileLayout::EqualColumns => TileLayout::EqualRows,
+            TileLayout::EqualRows => TileLayout::MainLeft,
+            TileLayout::MainLeft => TileLayout::Grid,
+            TileLayout::Grid => TileLayout::EqualColumns,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TileLayout::EqualColumns => "columns",
+            TileLayout::EqualRows => "rows",
+            TileLayout::MainLeft => "main-left",
+            TileLayout::Grid => "grid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum PaneDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 // Client → Server
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientMsg {
@@ -53,6 +95,16 @@ pub enum ClientMsg {
     CloseWindow,
     /// Search all windows for text content
     SearchWindows { query: String },
+    /// Toggle group layout mode (Stacked ↔ Tiled)
+    ToggleLayout,
+    /// Cycle tile layout algorithm
+    CycleLayout,
+    /// Toggle a window in/out of the tile set
+    ToggleTile { id: NodeId },
+    /// Move focus between panes in tiled mode
+    FocusPane { direction: PaneDirection },
+    /// Send input to a specific window (used in tiled mode)
+    InputToWindow { window_id: NodeId, data: Vec<u8> },
     /// Shut down the server
     Shutdown,
 }
@@ -72,6 +124,9 @@ pub enum ServerMsg {
         active_project: Option<NodeId>,
         active_group: Option<NodeId>,
         active_window: Option<NodeId>,
+        layout_mode: LayoutMode,
+        tile_layout: TileLayout,
+        tiled_windows: Vec<NodeId>,
     },
     /// Error
     Error { message: String },

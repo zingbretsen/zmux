@@ -1,4 +1,4 @@
-use crate::protocol::{self, ClientMsg, NodeId, ServerMsg};
+use crate::protocol::{self, ClientMsg, NodeId, PaneDirection, ServerMsg};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::io::BufReader;
@@ -135,5 +135,25 @@ impl ClientConnection {
 
     pub async fn detach(&self) -> Result<()> {
         self.send(ClientMsg::Detach).await
+    }
+
+    pub async fn toggle_layout(&self) -> Result<()> {
+        self.send(ClientMsg::ToggleLayout).await
+    }
+
+    pub async fn cycle_layout(&self) -> Result<()> {
+        self.send(ClientMsg::CycleLayout).await
+    }
+
+    pub async fn toggle_tile(&self, id: NodeId) -> Result<()> {
+        self.send(ClientMsg::ToggleTile { id }).await
+    }
+
+    pub async fn focus_pane(&self, direction: PaneDirection) -> Result<()> {
+        self.send(ClientMsg::FocusPane { direction }).await
+    }
+
+    pub async fn send_input_to_window(&self, window_id: NodeId, data: Vec<u8>) -> Result<()> {
+        self.send(ClientMsg::InputToWindow { window_id, data }).await
     }
 }
