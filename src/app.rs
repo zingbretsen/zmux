@@ -56,8 +56,13 @@ pub struct App {
     pub rename_buf: String,
     pub rename_target: Option<NodeId>,
 
-    // Copy mode scroll offset
+    // Copy mode state
     pub copy_scroll_offset: usize,
+    pub copy_cursor_row: u16,
+    pub copy_cursor_col: u16,
+    pub copy_selecting: bool,
+    pub copy_sel_start: (usize, u16), // (absolute line, col)
+    pub paste_buffer: String,
 
     // Status message shown briefly in the tab bar
     pub status_message: Option<(String, Instant)>,
@@ -97,6 +102,11 @@ impl App {
             rename_buf: String::new(),
             rename_target: None,
             copy_scroll_offset: 0,
+            copy_cursor_row: 0,
+            copy_cursor_col: 0,
+            copy_selecting: false,
+            copy_sel_start: (0, 0),
+            paste_buffer: String::new(),
             status_message: None,
             branch_candidates: Vec::new(),
             branch_selected: None,

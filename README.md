@@ -45,6 +45,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `M` | Merge active group's worktree branch into main |
 | `/` | Search across all windows for text |
 | `[` | Enter copy (scroll) mode |
+| `]` | Paste from copy buffer |
 | `t` | Toggle layout mode (Stacked ↔ Tiled) |
 | `T` | Cycle tile layout (columns → rows → main-left → grid) |
 | `m` | Toggle current window in/out of tile set |
@@ -54,13 +55,21 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 
 | Key | Action |
 |-----|--------|
-| `q` / `Esc` | Exit copy mode |
-| `k` / `Up` | Scroll up 1 line |
-| `j` / `Down` | Scroll down 1 line |
+| `q` / `Esc` | Exit copy mode (or cancel selection) |
+| `h` / `Left` | Move cursor left |
+| `l` / `Right` | Move cursor right |
+| `k` / `Up` | Move cursor up (scrolls if at top) |
+| `j` / `Down` | Move cursor down (scrolls if at bottom) |
+| `0` | Move cursor to beginning of line |
+| `$` | Move cursor to end of line |
+| `w` | Jump to next word |
+| `b` | Jump to previous word |
 | `Ctrl+U` | Scroll up half page |
 | `Ctrl+D` | Scroll down half page |
 | `g` | Jump to top of scrollback |
 | `G` | Jump to bottom (live view) |
+| `Space` | Start/cancel selection |
+| `Enter` | Yank selection and exit copy mode |
 
 ### AI Nav Mode
 

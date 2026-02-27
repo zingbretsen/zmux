@@ -34,6 +34,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
 
+    // Copy mode overlay: cursor and selection
+    if matches!(app.mode, Mode::Copy) {
+        draw_copy_overlay(f, app, chunks[1]);
+    }
+
     if matches!(app.mode, Mode::Help) {
         draw_help(f, area);
     }
@@ -42,6 +47,52 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if matches!(app.mode, Mode::PresetInput) {
         draw_preset_picker(f, app, area);
+    }
+}
+
+fn draw_copy_overlay(f: &mut Frame, app: &App, content_area: Rect) {
+    let buf = f.buffer_mut();
+    let screen_rows = app.term_rows;
+    let screen_cols = app.term_cols;
+
+    // If selecting, highlight the selection range
+    if app.copy_selecting {
+        let cur_abs = app.copy_scroll_offset + (screen_rows - 1 - app.copy_cursor_row) as usize;
+        let sel_start = app.copy_sel_start;
+        let sel_end = (cur_abs, app.copy_cursor_col);
+
+        // Normalize: from = higher abs (older), to = lower abs (newer)
+        let (from, to) = if sel_start.0 > sel_end.0 || (sel_start.0 == sel_end.0 && sel_start.1 <= sel_end.1) {
+            (sel_start, sel_end)
+        } else {
+            (sel_end, sel_start)
+        };
+
+        for row in 0..screen_rows {
+            let row_abs = app.copy_scroll_offset + (screen_rows - 1 - row) as usize;
+            if row_abs > from.0 || row_abs < to.0 {
+                continue;
+            }
+            let col_start = if row_abs == from.0 { from.1 } else { 0 };
+            let col_end = if row_abs == to.0 { to.1 } else { screen_cols - 1 };
+
+            for col in col_start..=col_end {
+                let x = content_area.x + col;
+                let y = content_area.y + row;
+                if x < content_area.right() && y < content_area.bottom() {
+                    let cell = &mut buf[(x, y)];
+                    cell.set_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+                }
+            }
+        }
+    }
+
+    // Draw cursor (inverted)
+    let cx = content_area.x + app.copy_cursor_col;
+    let cy = content_area.y + app.copy_cursor_row;
+    if cx < content_area.right() && cy < content_area.bottom() {
+        let cell = &mut buf[(cx, cy)];
+        cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
     }
 }
 
@@ -452,7 +503,10 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     }
     if matches!(app.mode, Mode::Copy) {
         spans.push(Span::styled(
-            format!(" [COPY {}]", app.copy_scroll_offset),
+            format!(" [COPY{}{}]",
+                if app.copy_selecting { " SEL" } else { "" },
+                if app.copy_scroll_offset > 0 { format!(" +{}", app.copy_scroll_offset) } else { String::new() },
+            ),
             Style::default().fg(Color::Magenta).bold(),
         ));
     }

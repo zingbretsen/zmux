@@ -17,3 +17,6 @@ dirs = "5"
 serde_json = "1"
 libc = "0.2"
 futures = "0.3"
+
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }
