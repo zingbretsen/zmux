@@ -21,6 +21,7 @@ pub struct ProjectPreset {
 pub struct GroupPreset {
     pub name: String,
     pub path: Option<String>,
+    pub worktree_branch: Option<String>,
     #[serde(rename = "window", default)]
     pub windows: Vec<WindowPreset>,
 }

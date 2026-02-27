@@ -2,6 +2,7 @@ use crate::ai_detect::{self, AiStatus};
 use crate::config;
 use crate::protocol::{self, ClientMsg, NodeId, ServerMsg, TabEntry};
 use crate::pty::PtyHandle;
+use crate::worktree;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,10 +29,11 @@ struct ProjectNode {
 
 struct GroupNode {
     name: String,
-    #[allow(dead_code)]
     parent: NodeId,
     children: Vec<NodeId>,
     working_dir: Option<PathBuf>,
+    /// If this group was created from a git worktree, track it for cleanup
+    worktree_path: Option<PathBuf>,
 }
 
 struct WindowNode {

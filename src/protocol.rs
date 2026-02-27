@@ -39,6 +39,10 @@ pub enum ClientMsg {
     MoveWindowToNewProject,
     /// Move active window to a new group (named after window's cwd)
     MoveWindowToNewGroup,
+    /// Create a new group with an associated git worktree
+    NewWorktreeGroup { branch: String },
+    /// Remove the active group's worktree and delete the group
+    CloseGroup { force: bool },
     /// Close the active window
     CloseWindow,
     /// Shut down the server
