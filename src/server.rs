@@ -1,0 +1,695 @@
+use crate::config;
+use crate::protocol::{self, ClientMsg, NodeId, ServerMsg, TabEntry};
+use crate::pty::PtyHandle;
+use anyhow::Result;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{mpsc, Mutex};
+
+// ── Server-side session tree ──
+
+struct SessionTree {
+    nodes: HashMap<NodeId, Node>,
+    root_children: Vec<NodeId>,
+    next_id: NodeId,
+    active_project: Option<NodeId>,
+    active_group: Option<NodeId>,
+    active_window: Option<NodeId>,
+}
+
+struct ProjectNode {
+    name: String,
+    working_dir: PathBuf,
+    children: Vec<NodeId>,
+}
+
+struct GroupNode {
+    name: String,
+    #[allow(dead_code)]
+    parent: NodeId,
+    children: Vec<NodeId>,
+    working_dir: Option<PathBuf>,
+}
+
+struct WindowNode {
+    name: String,
+    #[allow(dead_code)]
+    parent: NodeId,
+    pty: PtyHandle,
+}
+
+enum Node {
+    Project(ProjectNode),
+    Group(GroupNode),
+    Window(WindowNode),
+}
+
+impl SessionTree {
+    fn new() -> Self {
+        SessionTree {
+            nodes: HashMap::new(),
+            root_children: Vec::new(),
+            next_id: 1,
+            active_project: None,
+            active_group: None,
+            active_window: None,
+        }
+    }
+
+    fn alloc_id(&mut self) -> NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn add_project(&mut self, name: String, working_dir: PathBuf) -> NodeId {
+        let id = self.alloc_id();
+        self.nodes.insert(id, Node::Project(ProjectNode {
+            name, working_dir, children: Vec::new(),
+        }));
+        self.root_children.push(id);
+        if self.active_project.is_none() {
+            self.active_project = Some(id);
+        }
+        id
+    }
+
+    fn add_group(&mut self, parent: NodeId, name: String, working_dir: Option<PathBuf>) -> NodeId {
+        let id = self.alloc_id();
+        self.nodes.insert(id, Node::Group(GroupNode {
+            name, parent, children: Vec::new(), working_dir,
+        }));
+        if let Some(Node::Project(p)) = self.nodes.get_mut(&parent) {
+            p.children.push(id);
+        }
+        if self.active_group.is_none() {
+            self.active_group = Some(id);
+        }
+        id
+    }
+
+    fn add_window(
+        &mut self,
+        parent: NodeId,
+        name: String,
+        rows: u16,
+        cols: u16,
+        pty_output_tx: mpsc::UnboundedSender<(NodeId, Vec<u8>)>,
+    ) -> Result<NodeId> {
+        let id = self.alloc_id();
+        let working_dir = self.window_working_dir(parent);
+
+        // Collect .env vars: project dir first, then group dir overlays
+        let mut env = HashMap::new();
+        if let Some(Node::Group(g)) = self.nodes.get(&parent) {
+            if let Some(Node::Project(p)) = self.nodes.get(&g.parent) {
+                env.extend(config::parse_dotenv(&p.working_dir));
+            }
+            if let Some(ref wd) = g.working_dir {
+                env.extend(config::parse_dotenv(wd));
+            }
+        }
+
+        let (pty, mut pty_rx) = PtyHandle::spawn_in(rows, cols, &working_dir, &env)?;
+
+        // Forward raw PTY bytes with window ID
+        let win_id = id;
+        tokio::spawn(async move {
+            while let Some(bytes) = pty_rx.recv().await {
+                if pty_output_tx.send((win_id, bytes)).is_err() {
+                    break;
+                }
+            }
+            // PTY exited — send empty sentinel to trigger window removal
+            let _ = pty_output_tx.send((win_id, Vec::new()));
+        });
+
+        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty }));
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&parent) {
+            g.children.push(id);
+        }
+        if self.active_window.is_none() {
+            self.active_window = Some(id);
+        }
+        Ok(id)
+    }
+
+    fn remove_window(&mut self, window_id: NodeId) {
+        // Get parent group before removing the node
+        let parent_id = if let Some(Node::Window(w)) = self.nodes.get(&window_id) {
+            Some(w.parent)
+        } else {
+            None
+        };
+
+        self.nodes.remove(&window_id);
+
+        // Remove from parent group's children
+        if let Some(pid) = parent_id {
+            if let Some(Node::Group(g)) = self.nodes.get_mut(&pid) {
+                g.children.retain(|id| *id != window_id);
+            }
+        }
+
+        // If this was the active window, select a sibling
+        if self.active_window == Some(window_id) {
+            self.active_window = parent_id.and_then(|pid| {
+                if let Some(Node::Group(g)) = self.nodes.get(&pid) {
+                    g.children.first().copied()
+                } else {
+                    None
+                }
+            });
+        }
+    }
+
+    fn window_working_dir(&self, group_id: NodeId) -> PathBuf {
+        if let Some(Node::Group(g)) = self.nodes.get(&group_id) {
+            if let Some(ref wd) = g.working_dir {
+                return wd.clone();
+            }
+            if let Some(Node::Project(p)) = self.nodes.get(&g.parent) {
+                return p.working_dir.clone();
+            }
+        }
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+    }
+
+    fn tab_state(&self) -> ServerMsg {
+        let projects: Vec<TabEntry> = self.root_children.iter().filter_map(|id| {
+            match self.nodes.get(id) {
+                Some(Node::Project(p)) => Some(TabEntry { id: *id, name: p.name.clone() }),
+                _ => None,
+            }
+        }).collect();
+
+        let groups: Vec<TabEntry> = if let Some(pid) = self.active_project {
+            if let Some(Node::Project(p)) = self.nodes.get(&pid) {
+                p.children.iter().filter_map(|id| match self.nodes.get(id) {
+                    Some(Node::Group(g)) => Some(TabEntry { id: *id, name: g.name.clone() }),
+                    _ => None,
+                }).collect()
+            } else { Vec::new() }
+        } else { Vec::new() };
+
+        let windows: Vec<TabEntry> = if let Some(gid) = self.active_group {
+            if let Some(Node::Group(g)) = self.nodes.get(&gid) {
+                g.children.iter().filter_map(|id| match self.nodes.get(id) {
+                    Some(Node::Window(w)) => Some(TabEntry { id: *id, name: w.name.clone() }),
+                    _ => None,
+                }).collect()
+            } else { Vec::new() }
+        } else { Vec::new() };
+
+        ServerMsg::TabState {
+            projects, groups, windows,
+            active_project: self.active_project,
+            active_group: self.active_group,
+            active_window: self.active_window,
+        }
+    }
+
+    fn select_project(&mut self, id: NodeId) {
+        self.active_project = Some(id);
+        if let Some(Node::Project(p)) = self.nodes.get(&id) {
+            let first_group = p.children.first().copied();
+            self.active_group = first_group;
+            if let Some(gid) = first_group {
+                if let Some(Node::Group(g)) = self.nodes.get(&gid) {
+                    self.active_window = g.children.first().copied();
+                } else { self.active_window = None; }
+            } else { self.active_window = None; }
+        }
+    }
+
+    fn select_group(&mut self, id: NodeId) {
+        self.active_group = Some(id);
+        if let Some(Node::Group(g)) = self.nodes.get(&id) {
+            self.active_window = g.children.first().copied();
+        } else { self.active_window = None; }
+    }
+
+    fn select_window(&mut self, id: NodeId) {
+        self.active_window = Some(id);
+    }
+
+    fn active_window_mut(&mut self) -> Option<&mut WindowNode> {
+        let id = self.active_window?;
+        match self.nodes.get_mut(&id) {
+            Some(Node::Window(w)) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
+        for node in self.nodes.values() {
+            if let Node::Window(w) = node {
+                w.pty.resize(rows, cols)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the cwd of the active window's shell process
+    fn active_window_cwd(&self) -> Option<PathBuf> {
+        let id = self.active_window?;
+        match self.nodes.get(&id) {
+            Some(Node::Window(w)) => w.pty.cwd(),
+            _ => None,
+        }
+    }
+
+    /// Set the active project's working directory to the active window's cwd
+    fn set_project_dir(&mut self) -> Option<String> {
+        let cwd = self.active_window_cwd()?;
+        let pid = self.active_project?;
+        if let Some(Node::Project(p)) = self.nodes.get_mut(&pid) {
+            p.working_dir = cwd.clone();
+            Some(format!("Project dir: {}", cwd.display()))
+        } else {
+            None
+        }
+    }
+
+    /// Set the active group's working directory to the active window's cwd
+    fn set_group_dir(&mut self) -> Option<String> {
+        let cwd = self.active_window_cwd()?;
+        let gid = self.active_group?;
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            g.working_dir = Some(cwd.clone());
+            Some(format!("Group dir: {}", cwd.display()))
+        } else {
+            None
+        }
+    }
+
+    /// Convert current session tree to a Preset for saving
+    fn to_preset(&self) -> config::Preset {
+        let projects = self.root_children.iter().filter_map(|pid| {
+            let p = match self.nodes.get(pid) {
+                Some(Node::Project(p)) => p,
+                _ => return None,
+            };
+            let groups = p.children.iter().filter_map(|gid| {
+                let g = match self.nodes.get(gid) {
+                    Some(Node::Group(g)) => g,
+                    _ => return None,
+                };
+                let windows = g.children.iter().filter_map(|wid| {
+                    match self.nodes.get(wid) {
+                        Some(Node::Window(w)) => Some(config::WindowPreset {
+                            name: w.name.clone(),
+                            command: None,
+                        }),
+                        _ => None,
+                    }
+                }).collect();
+                Some(config::GroupPreset {
+                    name: g.name.clone(),
+                    path: g.working_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    windows,
+                })
+            }).collect();
+            Some(config::ProjectPreset {
+                name: p.name.clone(),
+                path: p.working_dir.to_string_lossy().to_string(),
+                groups,
+            })
+        }).collect();
+        config::Preset { projects }
+    }
+
+    /// Get a screen dump for attach/reconnect: convert vt100 screen to ANSI bytes
+    fn screen_dump(&self, window_id: NodeId) -> Option<Vec<u8>> {
+        match self.nodes.get(&window_id) {
+            Some(Node::Window(w)) => {
+                let parser = w.pty.parser.lock().unwrap();
+                Some(screen_to_ansi(parser.screen()))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Convert a vt100 screen to ANSI escape sequences that reproduce it.
+/// Used only for attach/reconnect, not for live streaming.
+fn screen_to_ansi(screen: &vt100::Screen) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8192);
+    out.extend_from_slice(b"\x1b[H\x1b[2J\x1b[0m");
+    let (rows, cols) = (screen.size().0, screen.size().1);
+    for row in 0..rows {
+        // Position cursor at start of each row explicitly
+        out.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
+        for col in 0..cols {
+            let cell = screen.cell(row, col).unwrap();
+            let c = cell.contents();
+            if c.is_empty() {
+                out.push(b' ');
+            } else {
+                out.extend_from_slice(c.as_bytes());
+            }
+        }
+    }
+    let cursor = screen.cursor_position();
+    out.extend_from_slice(format!("\x1b[{};{}H", cursor.0 + 1, cursor.1 + 1).as_bytes());
+    out
+}
+
+// ── Server state ──
+
+struct ServerState {
+    session: SessionTree,
+    client_tx: Option<mpsc::UnboundedSender<ServerMsg>>,
+    term_size: (u16, u16),
+    preset_name: Option<String>,
+}
+
+pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
+    let sock_path = protocol::socket_path();
+
+    if sock_path.exists() {
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    let listener = UnixListener::bind(&sock_path)?;
+    eprintln!("zmux server listening on {}", sock_path.display());
+
+    let mut session = SessionTree::new();
+    let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<(NodeId, Vec<u8>)>();
+
+    let default_rows: u16 = 24;
+    let default_cols: u16 = 80;
+
+    if let Some(name) = preset_name {
+        let preset = config::load_preset(name)?;
+        for proj_preset in &preset.projects {
+            let project_id = session.add_project(proj_preset.name.clone(), PathBuf::from(&proj_preset.path));
+            for grp_preset in &proj_preset.groups {
+                let group_dir = grp_preset.path.as_ref().map(|p| PathBuf::from(p));
+                let group_id = session.add_group(project_id, grp_preset.name.clone(), group_dir);
+                if grp_preset.windows.is_empty() {
+                    session.add_window(group_id, "shell".to_string(), default_rows, default_cols, pty_tx.clone())?;
+                } else {
+                    for win_preset in &grp_preset.windows {
+                        session.add_window(group_id, win_preset.name.clone(), default_rows, default_cols, pty_tx.clone())?;
+                    }
+                }
+            }
+            if proj_preset.groups.is_empty() {
+                let group_id = session.add_group(project_id, "default".to_string(), None);
+                session.add_window(group_id, "shell".to_string(), default_rows, default_cols, pty_tx.clone())?;
+            }
+        }
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let dir_name = cwd.file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        let project_id = session.add_project(dir_name, cwd);
+        let group_id = session.add_group(project_id, "default".to_string(), None);
+        session.add_window(group_id, "shell".to_string(), default_rows, default_cols, pty_tx.clone())?;
+    }
+
+    let state = Arc::new(Mutex::new(ServerState {
+        session,
+        client_tx: None,
+        term_size: (default_cols, default_rows),
+        preset_name: preset_name.map(|s| s.to_string()),
+    }));
+
+    // PTY output forwarder: sends raw bytes as PtyOutput to connected client
+    let state_clone = Arc::clone(&state);
+    tokio::spawn(async move {
+        while let Some((window_id, data)) = pty_rx.recv().await {
+            if data.is_empty() {
+                // Sentinel: PTY exited, remove the window
+                let mut st = state_clone.lock().await;
+                st.session.remove_window(window_id);
+                if let Some(ref tx) = st.client_tx {
+                    let tab = st.session.tab_state();
+                    let _ = tx.send(tab);
+                    // Send screen dump for the new active window
+                    if let Some(wid) = st.session.active_window {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            let _ = tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        }
+                    }
+                }
+                continue;
+            }
+            let st = state_clone.lock().await;
+            if let Some(ref tx) = st.client_tx {
+                if st.session.active_window == Some(window_id) {
+                    let _ = tx.send(ServerMsg::PtyOutput { window_id, data });
+                }
+            }
+        }
+    });
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let state = Arc::clone(&state);
+        let pty_tx = pty_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_client(stream, state, pty_tx).await {
+                eprintln!("Client error: {}", e);
+            }
+        });
+    }
+}
+
+async fn handle_client(
+    stream: UnixStream,
+    state: Arc<Mutex<ServerState>>,
+    pty_tx: mpsc::UnboundedSender<(NodeId, Vec<u8>)>,
+) -> Result<()> {
+    let (reader, writer) = tokio::io::split(stream);
+    let mut reader = tokio::io::BufReader::new(reader);
+    let writer = Arc::new(Mutex::new(writer));
+
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel::<ServerMsg>();
+
+    // Register as active client and send initial state
+    {
+        let mut st = state.lock().await;
+        st.client_tx = Some(client_tx.clone());
+
+        let tab_state = st.session.tab_state();
+        let _ = client_tx.send(tab_state);
+
+        // Send full screen dump for attach (client will feed it to its vt100 parser)
+        if let Some(wid) = st.session.active_window {
+            if let Some(data) = st.session.screen_dump(wid) {
+                let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+            }
+        }
+    }
+
+    // Writer task
+    let writer_clone = Arc::clone(&writer);
+    let writer_task = tokio::spawn(async move {
+        while let Some(msg) = client_rx.recv().await {
+            let mut w = writer_clone.lock().await;
+            if protocol::write_msg(&mut *w, &msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Reader loop
+    loop {
+        let msg: Option<ClientMsg> = protocol::read_msg(&mut reader).await?;
+        let msg = match msg {
+            Some(m) => m,
+            None => break,
+        };
+
+        let mut st = state.lock().await;
+        match msg {
+            ClientMsg::Input { data } => {
+                if let Some(w) = st.session.active_window_mut() {
+                    let _ = w.pty.write(&data);
+                }
+            }
+            ClientMsg::Resize { cols, rows } => {
+                st.term_size = (cols, rows);
+                let term_rows = rows.saturating_sub(1);
+                let _ = st.session.resize_all(term_rows, cols);
+                if let Some(wid) = st.session.active_window {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                    }
+                }
+            }
+            ClientMsg::SelectProject { id } => {
+                st.session.select_project(id);
+                let tab = st.session.tab_state();
+                let _ = client_tx.send(tab);
+                if let Some(wid) = st.session.active_window {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                    }
+                }
+            }
+            ClientMsg::SelectGroup { id } => {
+                st.session.select_group(id);
+                let tab = st.session.tab_state();
+                let _ = client_tx.send(tab);
+                if let Some(wid) = st.session.active_window {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                    }
+                }
+            }
+            ClientMsg::SelectWindow { id } => {
+                st.session.select_window(id);
+                let tab = st.session.tab_state();
+                let _ = client_tx.send(tab);
+                if let Some(data) = st.session.screen_dump(id) {
+                    let _ = client_tx.send(ServerMsg::ScreenDump { window_id: id, data });
+                }
+            }
+            ClientMsg::NewWindow { name } => {
+                if let Some(group_id) = st.session.active_group {
+                    let (cols, rows) = st.term_size;
+                    let term_rows = rows.saturating_sub(1);
+                    let win_name = name.unwrap_or_else(|| {
+                        let count = if let Some(Node::Group(g)) = st.session.nodes.get(&group_id) {
+                            g.children.len()
+                        } else { 0 };
+                        format!("shell-{}", count + 1)
+                    });
+                    if let Ok(id) = st.session.add_window(group_id, win_name.clone(), term_rows, cols, pty_tx.clone()) {
+                        st.session.select_window(id);
+                        let tab = st.session.tab_state();
+                        let _ = client_tx.send(tab);
+                    }
+                }
+            }
+            ClientMsg::NewGroup { name } => {
+                if let Some(project_id) = st.session.active_project {
+                    let grp_name = name.unwrap_or_else(|| {
+                        if let Some(Node::Project(p)) = st.session.nodes.get(&project_id) {
+                            format!("group-{}", p.children.len() + 1)
+                        } else {
+                            "group".to_string()
+                        }
+                    });
+                    let group_id = st.session.add_group(project_id, grp_name, None);
+                    let (cols, rows) = st.term_size;
+                    let term_rows = rows.saturating_sub(1);
+                    if let Ok(wid) = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone()) {
+                        st.session.select_group(group_id);
+                        st.session.select_window(wid);
+                        let tab = st.session.tab_state();
+                        let _ = client_tx.send(tab);
+                    }
+                }
+            }
+            ClientMsg::NewProject { name } => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+                let proj_name = name.unwrap_or_else(|| {
+                    cwd.file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "default".to_string())
+                });
+                let project_id = st.session.add_project(proj_name, cwd);
+                let group_id = st.session.add_group(project_id, "default".to_string(), None);
+                let (cols, rows) = st.term_size;
+                let term_rows = rows.saturating_sub(1);
+                if let Ok(wid) = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone()) {
+                    st.session.select_project(project_id);
+                    st.session.select_window(wid);
+                    let tab = st.session.tab_state();
+                    let _ = client_tx.send(tab);
+                }
+            }
+            ClientMsg::Subscribe => {
+                let tab = st.session.tab_state();
+                let _ = client_tx.send(tab);
+                if let Some(wid) = st.session.active_window {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                    }
+                }
+            }
+            ClientMsg::LoadPreset { name } => {
+                match config::load_preset(&name) {
+                    Ok(preset) => {
+                        let (cols, rows) = st.term_size;
+                        let term_rows = rows.saturating_sub(1);
+                        for proj_preset in &preset.projects {
+                            let project_id = st.session.add_project(
+                                proj_preset.name.clone(), PathBuf::from(&proj_preset.path),
+                            );
+                            for grp_preset in &proj_preset.groups {
+                                let group_dir = grp_preset.path.as_ref().map(|p| PathBuf::from(p));
+                                let group_id = st.session.add_group(project_id, grp_preset.name.clone(), group_dir);
+                                if grp_preset.windows.is_empty() {
+                                    let _ = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone());
+                                } else {
+                                    for win_preset in &grp_preset.windows {
+                                        let _ = st.session.add_window(group_id, win_preset.name.clone(), term_rows, cols, pty_tx.clone());
+                                    }
+                                }
+                            }
+                        }
+                        let tab = st.session.tab_state();
+                        let _ = client_tx.send(tab);
+                    }
+                    Err(e) => {
+                        let _ = client_tx.send(ServerMsg::Error { message: format!("Failed to load preset: {}", e) });
+                    }
+                }
+            }
+            ClientMsg::SetProjectDir => {
+                let msg = st.session.set_project_dir()
+                    .unwrap_or_else(|| "No active window".to_string());
+                let _ = client_tx.send(ServerMsg::Info { message: msg });
+            }
+            ClientMsg::SetGroupDir => {
+                let msg = st.session.set_group_dir()
+                    .unwrap_or_else(|| "No active window".to_string());
+                let _ = client_tx.send(ServerMsg::Info { message: msg });
+            }
+            ClientMsg::SavePreset { name } => {
+                let preset_name = name
+                    .or_else(|| st.preset_name.clone())
+                    .unwrap_or_else(|| {
+                        // Derive from first project name
+                        st.session.root_children.first()
+                            .and_then(|id| match st.session.nodes.get(id) {
+                                Some(Node::Project(p)) => Some(p.name.clone()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "default".to_string())
+                    });
+                let preset = st.session.to_preset();
+                match config::save_preset(&preset_name, &preset) {
+                    Ok(_) => {
+                        st.preset_name = Some(preset_name.clone());
+                        let _ = client_tx.send(ServerMsg::Info {
+                            message: format!("Saved preset: {}", preset_name),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = client_tx.send(ServerMsg::Error {
+                            message: format!("Failed to save: {}", e),
+                        });
+                    }
+                }
+            }
+            ClientMsg::Detach => break,
+        }
+    }
+
+    {
+        let mut st = state.lock().await;
+        st.client_tx = None;
+    }
+    writer_task.abort();
+    eprintln!("Client detached");
+    Ok(())
+}
