@@ -35,6 +35,19 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `X` | Close active group (removes worktree if applicable) |
 | `R` | Rebase active group's branch onto main |
 | `M` | Merge active group's worktree branch into main |
+| `[` | Enter copy (scroll) mode |
+
+### Copy Mode
+
+| Key | Action |
+|-----|--------|
+| `q` / `Esc` | Exit copy mode |
+| `k` / `Up` | Scroll up 1 line |
+| `j` / `Down` | Scroll down 1 line |
+| `Ctrl+U` | Scroll up half page |
+| `Ctrl+D` | Scroll down half page |
+| `g` | Jump to top of scrollback |
+| `G` | Jump to bottom (live view) |
 
 ### AI Nav Mode
 

@@ -165,6 +165,12 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     if matches!(app.mode, Mode::AiNav) {
         spans.push(Span::styled(" [AI]", Style::default().fg(Color::Green).bold()));
     }
+    if matches!(app.mode, Mode::Copy) {
+        spans.push(Span::styled(
+            format!(" [COPY {}]", app.copy_scroll_offset),
+            Style::default().fg(Color::Magenta).bold(),
+        ));
+    }
     // Status message (shown for 3 seconds)
     if let Some((ref msg, ref when)) = app.status_message {
         if when.elapsed() < Duration::from_secs(3) {
