@@ -129,6 +129,14 @@ impl ClientConnection {
         self.send(ClientMsg::ListBranches).await
     }
 
+    pub async fn list_presets(&self) -> Result<()> {
+        self.send(ClientMsg::ListPresets).await
+    }
+
+    pub async fn load_preset(&self, name: String) -> Result<()> {
+        self.send(ClientMsg::LoadPreset { name }).await
+    }
+
     pub async fn close_group(&self, force: bool) -> Result<()> {
         self.send(ClientMsg::CloseGroup { force }).await
     }

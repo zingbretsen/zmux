@@ -14,6 +14,7 @@ pub enum Mode {
     AiNav,
     Rename,
     BranchInput,
+    PresetInput,
     Help,
 }
 
@@ -64,6 +65,10 @@ pub struct App {
     // Branch picker state
     pub branch_candidates: Vec<String>,
     pub branch_selected: Option<usize>,
+
+    // Preset picker state
+    pub preset_candidates: Vec<String>,
+    pub preset_selected: Option<usize>,
 }
 
 impl App {
@@ -95,6 +100,8 @@ impl App {
             status_message: None,
             branch_candidates: Vec::new(),
             branch_selected: None,
+            preset_candidates: Vec::new(),
+            preset_selected: None,
         })
     }
 
@@ -143,6 +150,10 @@ impl App {
             ServerMsg::BranchList { branches } => {
                 self.branch_candidates = branches;
                 self.branch_selected = None;
+            }
+            ServerMsg::PresetList { presets } => {
+                self.preset_candidates = presets;
+                self.preset_selected = None;
             }
             ServerMsg::WindowCreated { .. } => {}
             ServerMsg::Error { message } => {
@@ -241,6 +252,16 @@ impl App {
             .iter()
             .filter(|b| query.is_empty() || b.to_lowercase().contains(&query))
             .map(|b| b.as_str())
+            .collect()
+    }
+
+    /// Get preset candidates filtered by current input.
+    pub fn filtered_presets(&self) -> Vec<&str> {
+        let query = self.rename_buf.to_lowercase();
+        self.preset_candidates
+            .iter()
+            .filter(|p| query.is_empty() || p.to_lowercase().contains(&query))
+            .map(|p| p.as_str())
             .collect()
     }
 

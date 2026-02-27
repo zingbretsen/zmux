@@ -65,6 +65,8 @@ pub enum ClientMsg {
     Subscribe,
     /// Load a preset
     LoadPreset { name: String },
+    /// List available presets
+    ListPresets,
     /// Save active window's cwd as the project's default directory
     SetProjectDir,
     /// Save active window's cwd as the group's default directory
@@ -138,6 +140,8 @@ pub enum ServerMsg {
     WindowCreated { id: NodeId, name: String, group_id: NodeId },
     /// List of git branches for branch picker
     BranchList { branches: Vec<String> },
+    /// List of available presets
+    PresetList { presets: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

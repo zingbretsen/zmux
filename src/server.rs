@@ -1348,6 +1348,18 @@ async fn handle_client(
                     let _ = client_tx.send(ServerMsg::BranchList { branches });
                 }
             }
+            ClientMsg::ListPresets => {
+                match config::list_presets() {
+                    Ok(presets) => {
+                        let _ = client_tx.send(ServerMsg::PresetList { presets });
+                    }
+                    Err(e) => {
+                        let _ = client_tx.send(ServerMsg::Error {
+                            message: format!("Failed to list presets: {}", e),
+                        });
+                    }
+                }
+            }
             ClientMsg::CloseGroup { force } => {
                 if let Some(group_id) = st.session.active_group {
                     // Check for dirty worktree

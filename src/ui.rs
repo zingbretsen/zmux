@@ -40,6 +40,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::BranchInput) {
         draw_branch_picker(f, app, area);
     }
+    if matches!(app.mode, Mode::PresetInput) {
+        draw_preset_picker(f, app, area);
+    }
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
@@ -54,7 +57,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
  r       Rename             ?       This help
  a       AI nav mode
  s       Set group dir      S       Set project dir
- W       Save preset
+ W       Save preset        L       Load preset
  w       New worktree group X       Close group
  R       Rebase onto main   M       Merge into main
  t       Toggle tiled       T       Cycle tile layout
@@ -129,6 +132,62 @@ fn draw_branch_picker(f: &mut Frame, app: &App, area: Rect) {
         .map(|(i, name)| {
             let actual_idx = i + scroll_offset;
             let is_selected = app.branch_selected == Some(actual_idx);
+            let style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Yellow).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(format!(" {} ", name), style))
+        })
+        .collect();
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
+}
+
+fn draw_preset_picker(f: &mut Frame, app: &App, area: Rect) {
+    let filtered = app.filtered_presets();
+    if filtered.is_empty() {
+        return;
+    }
+
+    let max_visible = 10usize;
+    let visible_count = filtered.len().min(max_visible);
+    let height = (visible_count as u16 + 2).min(area.height);
+    let width = filtered.iter().map(|p| p.len()).max().unwrap_or(10).max(20) as u16 + 4;
+    let width = width.min(area.width);
+
+    let x = area.x + 1;
+    let y = area.y + 1;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Presets ");
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let scroll_offset = if let Some(sel) = app.preset_selected {
+        if sel >= max_visible {
+            sel - max_visible + 1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = filtered
+        .iter()
+        .skip(scroll_offset)
+        .take(max_visible)
+        .enumerate()
+        .map(|(i, name)| {
+            let actual_idx = i + scroll_offset;
+            let is_selected = app.preset_selected == Some(actual_idx);
             let style = if is_selected {
                 Style::default().fg(Color::Black).bg(Color::Yellow).bold()
             } else {
@@ -276,6 +335,14 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         // Tab bar shows input; popup drawn separately
         let line = Line::from(vec![
             Span::styled(" branch: ", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    if matches!(app.mode, Mode::PresetInput) {
+        let line = Line::from(vec![
+            Span::styled(" preset: ", Style::default().fg(Color::Yellow).bold()),
             Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
         ]);
         f.render_widget(Paragraph::new(line), area);

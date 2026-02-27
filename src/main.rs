@@ -169,6 +169,7 @@ async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<(
         Mode::Copy => handle_copy_key(app, key).await,
         Mode::Search => handle_search_key(app, key).await,
         Mode::BranchInput => handle_branch_input_key(app, key).await,
+        Mode::PresetInput => handle_preset_input_key(app, key).await,
         Mode::Help => {
             app.mode = Mode::Normal;
             Ok(())
@@ -299,6 +300,15 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         KeyCode::Char('W') => {
             app.conn.save_preset(None).await?;
             app.mode = Mode::Normal;
+        }
+
+        // Load preset
+        KeyCode::Char('L') => {
+            app.rename_buf.clear();
+            app.preset_candidates.clear();
+            app.preset_selected = None;
+            app.conn.list_presets().await?;
+            app.mode = Mode::PresetInput;
         }
 
         // Worktree: new group from branch
@@ -469,6 +479,67 @@ async fn handle_branch_input_key(app: &mut App, key: &crossterm::event::KeyEvent
         KeyCode::Char(c) => {
             app.rename_buf.push(c);
             app.branch_selected = None;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_preset_input_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.rename_buf.clear();
+            app.preset_candidates.clear();
+            app.preset_selected = None;
+            app.mode = Mode::Nav;
+        }
+        KeyCode::Enter => {
+            let name = if let Some(idx) = app.preset_selected {
+                let filtered = app.filtered_presets();
+                filtered.get(idx).map(|s| s.to_string())
+            } else {
+                None
+            };
+            let name = name.unwrap_or_else(|| app.rename_buf.clone());
+            if !name.is_empty() {
+                app.conn.load_preset(name).await?;
+            }
+            app.rename_buf.clear();
+            app.preset_candidates.clear();
+            app.preset_selected = None;
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Down => {
+            let count = app.filtered_presets().len();
+            if count > 0 {
+                app.preset_selected = Some(match app.preset_selected {
+                    None => 0,
+                    Some(i) => (i + 1).min(count - 1),
+                });
+            }
+        }
+        KeyCode::Up => {
+            app.preset_selected = match app.preset_selected {
+                None | Some(0) => None,
+                Some(i) => Some(i - 1),
+            };
+        }
+        KeyCode::Tab => {
+            if let Some(idx) = app.preset_selected {
+                let filtered = app.filtered_presets();
+                if let Some(name) = filtered.get(idx) {
+                    app.rename_buf = name.to_string();
+                    app.preset_selected = None;
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            app.rename_buf.pop();
+            app.preset_selected = None;
+        }
+        KeyCode::Char(c) => {
+            app.rename_buf.push(c);
+            app.preset_selected = None;
         }
         _ => {}
     }
