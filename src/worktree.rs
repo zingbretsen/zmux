@@ -102,6 +102,7 @@ pub fn list_branches(project_dir: &Path) -> Vec<String> {
 }
 
 /// List existing worktree branches under .worktrees/
+#[allow(dead_code)]
 pub fn list_worktrees(project_dir: &Path) -> Vec<String> {
     let worktrees_dir = project_dir.join(".worktrees");
     if !worktrees_dir.exists() {
