@@ -503,6 +503,15 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let half_page = (app.last_size.1 / 2) as usize;
 
+    let max_scrollback = |app: &App| -> usize {
+        if let Some(wid) = app.active_window {
+            if let Some(parser) = app.parser_for(wid) {
+                return parser.lock().unwrap().screen().scrollback();
+            }
+        }
+        0
+    };
+
     let set_scrollback = |app: &mut App, offset: usize| {
         if let Some(wid) = app.active_window {
             if let Some(parser) = app.parser_for(wid) {
@@ -518,7 +527,8 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
             app.mode = Mode::Normal;
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(1).min(1000);
+            let max = max_scrollback(app);
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(1).min(max);
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('j') | KeyCode::Down => {
@@ -526,7 +536,8 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('u') if ctrl => {
-            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(half_page).min(1000);
+            let max = max_scrollback(app);
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(half_page).min(max);
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('d') if ctrl => {
@@ -534,7 +545,7 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('g') => {
-            app.copy_scroll_offset = 1000;
+            app.copy_scroll_offset = max_scrollback(app);
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('G') => {
