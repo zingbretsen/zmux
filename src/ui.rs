@@ -4,6 +4,12 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::time::Duration;
 use tui_term::widget::PseudoTerminal;
 
+pub enum TabClick {
+    Project(usize),
+    Group(usize),
+    Window(usize),
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
@@ -182,6 +188,69 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Map a column position on the tab bar to a clickable tab entry.
+pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
+    let active_proj_idx = app.active_project
+        .and_then(|id| app.projects.iter().position(|e| e.id == id))
+        .unwrap_or(0);
+    let active_win_idx = app.active_window
+        .and_then(|id| app.windows.iter().position(|e| e.id == id))
+        .unwrap_or(0);
+
+    let col = col as usize;
+    let mut x: usize = 0;
+
+    // Project: " {name}"
+    let proj_name = app.projects.get(active_proj_idx).map(|e| e.name.as_str()).unwrap_or("?");
+    let proj_span = 1 + proj_name.len(); // " {name}"
+    if col < x + proj_span {
+        return Some(TabClick::Project(active_proj_idx));
+    }
+    x += proj_span;
+    x += 3; // " > "
+
+    // Group: "{name}"
+    let active_grp_idx = app.active_group
+        .and_then(|id| app.groups.iter().position(|e| e.id == id))
+        .unwrap_or(0);
+    let grp_name = app.groups.get(active_grp_idx).map(|e| e.name.as_str()).unwrap_or("?");
+    let grp_span = grp_name.len();
+    if col >= x && col < x + grp_span {
+        return Some(TabClick::Group(active_grp_idx));
+    }
+    x += grp_span;
+    x += 3; // " > "
+
+    // Windows — replicate visible_tab_range logic
+    let nav = matches!(app.mode, Mode::Nav);
+    let prefix_width = x;
+    let suffix_width = if nav { 6 } else { 0 };
+    let avail_width = (app.last_size.0 as usize).saturating_sub(prefix_width + suffix_width);
+
+    let tab_widths: Vec<usize> = app.windows.iter().enumerate().map(|(i, entry)| {
+        entry.name.len() + if i > 0 { 3 } else { 0 }
+    }).collect();
+
+    let (start, end) = visible_tab_range(&tab_widths, active_win_idx, avail_width);
+
+    if start > 0 {
+        x += 2; // "< "
+    }
+    for i in start..end {
+        if i > start {
+            x += 3; // " | "
+        }
+        let name_len = app.windows[i].name.len();
+        let ai_len = if app.windows[i].ai_status.is_some() { 1 } else { 0 };
+        if col >= x && col < x + name_len + ai_len {
+            return Some(TabClick::Window(i));
+        }
+        x += name_len + ai_len;
+    }
+
+    None
 }
 
 /// Given tab widths (each including its separator), find the [start, end) range

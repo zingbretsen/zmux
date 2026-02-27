@@ -11,7 +11,7 @@ mod worktree;
 use anyhow::Result;
 use app::{App, Mode, TabLevel};
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{Event, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -426,6 +426,33 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
 }
 
 async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -> Result<()> {
+    // Tab bar clicks work in any mode
+    if mouse.row == 0 {
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if let Some(click) = ui::tab_click_at(app, mouse.column) {
+                match click {
+                    ui::TabClick::Project(idx) => {
+                        if let Some(entry) = app.projects.get(idx) {
+                            app.conn.select_project(entry.id).await?;
+                        }
+                    }
+                    ui::TabClick::Group(idx) => {
+                        if let Some(entry) = app.groups.get(idx) {
+                            app.conn.select_group(entry.id).await?;
+                        }
+                    }
+                    ui::TabClick::Window(idx) => {
+                        if let Some(entry) = app.windows.get(idx) {
+                            app.conn.select_window(entry.id).await?;
+                        }
+                    }
+                }
+                app.mode = Mode::Normal;
+            }
+            return Ok(());
+        }
+    }
+
     if app.mode != Mode::Normal {
         return Ok(());
     }

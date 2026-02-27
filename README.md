@@ -4,6 +4,12 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 
 ## Keybindings
 
+### Mouse
+
+| Action | Effect |
+|--------|--------|
+| Click tab bar | Switch to clicked project/group/window |
+
 ### Normal Mode
 
 | Key | Action |
