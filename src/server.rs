@@ -211,8 +211,23 @@ impl SessionTree {
             p.children.retain(|id| *id != group_id);
         }
 
-        // Fix active selections if needed
-        if self.active_group == Some(group_id) {
+        // If the parent project is now empty, remove it and select a sibling project
+        let project_empty = matches!(self.nodes.get(&parent_id), Some(Node::Project(p)) if p.children.is_empty());
+        if project_empty {
+            self.nodes.remove(&parent_id);
+            self.root_children.retain(|id| *id != parent_id);
+
+            if self.active_project == Some(parent_id) {
+                self.active_project = self.root_children.first().copied();
+                if let Some(pid) = self.active_project {
+                    self.select_project(pid);
+                } else {
+                    self.active_group = None;
+                    self.active_window = None;
+                }
+            }
+        } else if self.active_group == Some(group_id) {
+            // Parent project still has groups, select a sibling
             if let Some(Node::Project(p)) = self.nodes.get(&parent_id) {
                 self.active_group = p.children.first().copied();
                 self.active_window = self.active_group.and_then(|gid| {
