@@ -80,10 +80,10 @@ impl SessionTree {
         id
     }
 
-    fn add_group(&mut self, parent: NodeId, name: String, working_dir: Option<PathBuf>) -> NodeId {
+    fn add_group(&mut self, parent: NodeId, name: String, working_dir: Option<PathBuf>, worktree_path: Option<PathBuf>) -> NodeId {
         let id = self.alloc_id();
         self.nodes.insert(id, Node::Group(GroupNode {
-            name, parent, children: Vec::new(), working_dir,
+            name, parent, children: Vec::new(), working_dir, worktree_path,
         }));
         if let Some(Node::Project(p)) = self.nodes.get_mut(&parent) {
             p.children.push(id);
@@ -167,6 +167,55 @@ impl SessionTree {
                 }
             });
         }
+    }
+
+    /// Remove a group and all its windows. Returns (project_dir, worktree_path) if worktree cleanup needed.
+    fn remove_group(&mut self, group_id: NodeId) -> Option<(PathBuf, PathBuf)> {
+        let (parent_id, window_ids, worktree_info) = match self.nodes.get(&group_id) {
+            Some(Node::Group(g)) => {
+                let wt_info = g.worktree_path.as_ref().and_then(|wt| {
+                    if let Some(Node::Project(p)) = self.nodes.get(&g.parent) {
+                        Some((p.working_dir.clone(), wt.clone()))
+                    } else {
+                        None
+                    }
+                });
+                (g.parent, g.children.clone(), wt_info)
+            }
+            _ => return None,
+        };
+
+        // Remove all windows in the group
+        for wid in &window_ids {
+            self.nodes.remove(wid);
+        }
+        self.nodes.remove(&group_id);
+
+        // Remove from parent project's children
+        if let Some(Node::Project(p)) = self.nodes.get_mut(&parent_id) {
+            p.children.retain(|id| *id != group_id);
+        }
+
+        // Fix active selections if needed
+        if self.active_group == Some(group_id) {
+            if let Some(Node::Project(p)) = self.nodes.get(&parent_id) {
+                self.active_group = p.children.first().copied();
+                self.active_window = self.active_group.and_then(|gid| {
+                    if let Some(Node::Group(g)) = self.nodes.get(&gid) {
+                        g.children.first().copied()
+                    } else {
+                        None
+                    }
+                });
+            } else {
+                self.active_group = None;
+                self.active_window = None;
+            }
+        } else if window_ids.contains(&self.active_window.unwrap_or(0)) {
+            self.active_window = None;
+        }
+
+        worktree_info
     }
 
     fn move_window_to_group(&mut self, window_id: NodeId, new_group_id: NodeId) {
@@ -418,6 +467,9 @@ impl SessionTree {
                 Some(config::GroupPreset {
                     name: g.name.clone(),
                     path: g.working_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    worktree_branch: g.worktree_path.as_ref().and_then(|wt| {
+                        wt.file_name().map(|n| n.to_string_lossy().to_string())
+                    }),
                     windows,
                 })
             }).collect();
@@ -497,7 +549,12 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
             let project_id = session.add_project(proj_preset.name.clone(), PathBuf::from(&proj_preset.path));
             for grp_preset in &proj_preset.groups {
                 let group_dir = grp_preset.path.as_ref().map(|p| PathBuf::from(p));
-                let group_id = session.add_group(project_id, grp_preset.name.clone(), group_dir);
+                let wt_path = grp_preset.worktree_branch.as_ref().and_then(|branch| {
+                    let proj_dir = PathBuf::from(&proj_preset.path);
+                    worktree::create(&proj_dir, branch).ok()
+                });
+                let working_dir = group_dir.or_else(|| wt_path.clone());
+                let group_id = session.add_group(project_id, grp_preset.name.clone(), working_dir, wt_path);
                 if grp_preset.windows.is_empty() {
                     session.add_window(group_id, "shell".to_string(), default_rows, default_cols, pty_tx.clone())?;
                 } else {
@@ -507,7 +564,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                 }
             }
             if proj_preset.groups.is_empty() {
-                let group_id = session.add_group(project_id, "default".to_string(), None);
+                let group_id = session.add_group(project_id, "default".to_string(), None, None);
                 session.add_window(group_id, "shell".to_string(), default_rows, default_cols, pty_tx.clone())?;
             }
         }
@@ -517,7 +574,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "default".to_string());
         let project_id = session.add_project(dir_name, cwd);
-        let group_id = session.add_group(project_id, "default".to_string(), None);
+        let group_id = session.add_group(project_id, "default".to_string(), None, None);
         session.add_window(group_id, "shell".to_string(), default_rows, default_cols, pty_tx.clone())?;
     }
 
@@ -703,7 +760,7 @@ async fn handle_client(
                             "group".to_string()
                         }
                     });
-                    let group_id = st.session.add_group(project_id, grp_name, None);
+                    let group_id = st.session.add_group(project_id, grp_name, None, None);
                     let (cols, rows) = st.term_size;
                     let term_rows = rows.saturating_sub(1);
                     if let Ok(wid) = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone()) {
@@ -722,7 +779,7 @@ async fn handle_client(
                         .unwrap_or_else(|| "default".to_string())
                 });
                 let project_id = st.session.add_project(proj_name, cwd);
-                let group_id = st.session.add_group(project_id, "default".to_string(), None);
+                let group_id = st.session.add_group(project_id, "default".to_string(), None, None);
                 let (cols, rows) = st.term_size;
                 let term_rows = rows.saturating_sub(1);
                 if let Ok(wid) = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone()) {
@@ -752,7 +809,11 @@ async fn handle_client(
                             );
                             for grp_preset in &proj_preset.groups {
                                 let group_dir = grp_preset.path.as_ref().map(|p| PathBuf::from(p));
-                                let group_id = st.session.add_group(project_id, grp_preset.name.clone(), group_dir);
+                                let wt_path = grp_preset.worktree_branch.as_ref().and_then(|branch| {
+                                    worktree::create(&PathBuf::from(&proj_preset.path), branch).ok()
+                                });
+                                let working_dir = group_dir.or_else(|| wt_path.clone());
+                                let group_id = st.session.add_group(project_id, grp_preset.name.clone(), working_dir, wt_path);
                                 if grp_preset.windows.is_empty() {
                                     let _ = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone());
                                 } else {
@@ -841,7 +902,7 @@ async fn handle_client(
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| "project".to_string());
                     let project_id = st.session.add_project(proj_name, cwd);
-                    let group_id = st.session.add_group(project_id, "default".to_string(), None);
+                    let group_id = st.session.add_group(project_id, "default".to_string(), None, None);
                     st.session.move_window_to_group(wid, group_id);
                     st.session.select_project(project_id);
                     st.session.active_group = Some(group_id);
@@ -857,13 +918,23 @@ async fn handle_client(
                     let grp_name = cwd.file_name()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| "group".to_string());
-                    let group_id = st.session.add_group(project_id, grp_name, Some(cwd));
+                    let group_id = st.session.add_group(project_id, grp_name, Some(cwd), None);
                     st.session.move_window_to_group(wid, group_id);
                     st.session.select_group(group_id);
                     st.session.active_window = Some(wid);
                     let tab = st.session.tab_state();
                     let _ = client_tx.send(tab);
                 }
+            }
+            ClientMsg::Rename { id, name } => {
+                match st.session.nodes.get_mut(&id) {
+                    Some(Node::Project(p)) => p.name = name,
+                    Some(Node::Group(g)) => g.name = name,
+                    Some(Node::Window(w)) => w.name = name,
+                    None => {}
+                }
+                let tab = st.session.tab_state();
+                let _ = client_tx.send(tab);
             }
             ClientMsg::CloseWindow => {
                 if let Some(wid) = st.session.active_window {
@@ -873,6 +944,82 @@ async fn handle_client(
                     if let Some(new_wid) = st.session.active_window {
                         if let Some(data) = st.session.screen_dump(new_wid) {
                             let _ = client_tx.send(ServerMsg::ScreenDump { window_id: new_wid, data });
+                        }
+                    }
+                }
+            }
+            ClientMsg::NewWorktreeGroup { branch } => {
+                if let Some(project_id) = st.session.active_project {
+                    let project_dir = match st.session.nodes.get(&project_id) {
+                        Some(Node::Project(p)) => p.working_dir.clone(),
+                        _ => {
+                            let _ = client_tx.send(ServerMsg::Error { message: "No active project".to_string() });
+                            continue;
+                        }
+                    };
+                    if !worktree::is_git_repo(&project_dir) {
+                        let _ = client_tx.send(ServerMsg::Error {
+                            message: format!("Not a git repo: {}", project_dir.display()),
+                        });
+                        continue;
+                    }
+                    match worktree::create(&project_dir, &branch) {
+                        Ok(wt_path) => {
+                            let group_id = st.session.add_group(
+                                project_id, branch.clone(), Some(wt_path.clone()), Some(wt_path),
+                            );
+                            let (cols, rows) = st.term_size;
+                            let term_rows = rows.saturating_sub(1);
+                            if let Ok(wid) = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone()) {
+                                st.session.select_group(group_id);
+                                st.session.select_window(wid);
+                                let tab = st.session.tab_state();
+                                let _ = client_tx.send(tab);
+                                let _ = client_tx.send(ServerMsg::Info {
+                                    message: format!("Worktree: {}", branch),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            let _ = client_tx.send(ServerMsg::Error {
+                                message: format!("Worktree failed: {}", e),
+                            });
+                        }
+                    }
+                }
+            }
+            ClientMsg::CloseGroup { force } => {
+                if let Some(group_id) = st.session.active_group {
+                    // Check for dirty worktree
+                    let is_wt = matches!(
+                        st.session.nodes.get(&group_id),
+                        Some(Node::Group(g)) if g.worktree_path.is_some()
+                    );
+                    if is_wt && !force {
+                        let dirty = match st.session.nodes.get(&group_id) {
+                            Some(Node::Group(g)) => g.worktree_path.as_ref()
+                                .map(|p| worktree::is_dirty(p)).unwrap_or(false),
+                            _ => false,
+                        };
+                        if dirty {
+                            let _ = client_tx.send(ServerMsg::Error {
+                                message: "Worktree has uncommitted changes. Use force to remove.".to_string(),
+                            });
+                            continue;
+                        }
+                    }
+                    if let Some((project_dir, wt_path)) = st.session.remove_group(group_id) {
+                        if let Err(e) = worktree::remove(&project_dir, &wt_path, force) {
+                            let _ = client_tx.send(ServerMsg::Error {
+                                message: format!("Worktree cleanup failed: {}", e),
+                            });
+                        }
+                    }
+                    let tab = st.session.tab_state();
+                    let _ = client_tx.send(tab);
+                    if let Some(wid) = st.session.active_window {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
                         }
                     }
                 }

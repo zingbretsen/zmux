@@ -6,6 +6,7 @@ mod protocol;
 mod pty;
 mod server;
 mod ui;
+mod worktree;
 
 use anyhow::Result;
 use app::{App, Mode, TabLevel};
@@ -163,6 +164,8 @@ async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<(
         Mode::Normal => handle_normal_key(app, key).await,
         Mode::Nav => handle_nav_key(app, key).await,
         Mode::AiNav => handle_ai_nav_key(app, key).await,
+        Mode::Rename => handle_rename_key(app, key).await,
+        Mode::BranchInput => handle_branch_input_key(app, key).await,
     }
 }
 
@@ -227,6 +230,26 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Normal;
         }
 
+        // Rename the focused tab
+        KeyCode::Char('r') => {
+            let target = match app.tab_focus {
+                TabLevel::Project => app.active_project,
+                TabLevel::Group => app.active_group,
+                TabLevel::Window => app.active_window,
+            };
+            if let Some(id) = target {
+                // Pre-fill with current name
+                let current_name = match app.tab_focus {
+                    TabLevel::Project => app.projects.iter().find(|e| e.id == id).map(|e| e.name.clone()),
+                    TabLevel::Group => app.groups.iter().find(|e| e.id == id).map(|e| e.name.clone()),
+                    TabLevel::Window => app.windows.iter().find(|e| e.id == id).map(|e| e.name.clone()),
+                };
+                app.rename_buf = current_name.unwrap_or_default();
+                app.rename_target = Some(id);
+                app.mode = Mode::Rename;
+            }
+        }
+
         // Enter AI navigation mode
         KeyCode::Char('a') => {
             app.conn.next_ai_window().await?;
@@ -249,6 +272,18 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Normal;
         }
 
+        // Worktree: new group from branch
+        KeyCode::Char('w') => {
+            app.rename_buf.clear();
+            app.mode = Mode::BranchInput;
+        }
+
+        // Close group (with worktree cleanup)
+        KeyCode::Char('X') => {
+            app.conn.close_group(false).await?;
+            app.mode = Mode::Normal;
+        }
+
         _ => {}
     }
     Ok(())
@@ -266,6 +301,57 @@ async fn handle_ai_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
         // Press 'a' again to go to next
         KeyCode::Char('a') => {
             app.conn.next_ai_window().await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_rename_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.rename_buf.clear();
+            app.rename_target = None;
+            app.mode = Mode::Nav;
+        }
+        KeyCode::Enter => {
+            if let Some(id) = app.rename_target.take() {
+                if !app.rename_buf.is_empty() {
+                    app.conn.rename(id, app.rename_buf.clone()).await?;
+                }
+            }
+            app.rename_buf.clear();
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.rename_buf.pop();
+        }
+        KeyCode::Char(c) => {
+            app.rename_buf.push(c);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_branch_input_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.rename_buf.clear();
+            app.mode = Mode::Nav;
+        }
+        KeyCode::Enter => {
+            if !app.rename_buf.is_empty() {
+                app.conn.new_worktree_group(app.rename_buf.clone()).await?;
+            }
+            app.rename_buf.clear();
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.rename_buf.pop();
+        }
+        KeyCode::Char(c) => {
+            app.rename_buf.push(c);
         }
         _ => {}
     }

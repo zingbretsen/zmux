@@ -20,6 +20,24 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
+    // For text input modes, take over the full tab bar
+    if matches!(app.mode, Mode::Rename) {
+        let line = Line::from(vec![
+            Span::styled(" rename: ", Style::default().fg(Color::Cyan).bold()),
+            Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    if matches!(app.mode, Mode::BranchInput) {
+        let line = Line::from(vec![
+            Span::styled(" branch: ", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
     let nav = matches!(app.mode, Mode::Nav);
 
     let active_proj_idx = app.active_project
@@ -104,7 +122,6 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     if matches!(app.mode, Mode::AiNav) {
         spans.push(Span::styled(" [AI]", Style::default().fg(Color::Green).bold()));
     }
-
     // Status message (shown for 3 seconds)
     if let Some((ref msg, ref when)) = app.status_message {
         if when.elapsed() < Duration::from_secs(3) {

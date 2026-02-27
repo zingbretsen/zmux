@@ -9,6 +9,8 @@ pub enum Mode {
     Normal,
     Nav,
     AiNav,
+    Rename,
+    BranchInput,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -37,6 +39,10 @@ pub struct App {
     // Client-side vt100 parser for the active window
     pub parser: Arc<Mutex<vt100::Parser>>,
 
+    // Rename input buffer
+    pub rename_buf: String,
+    pub rename_target: Option<NodeId>,
+
     // Status message shown briefly in the tab bar
     pub status_message: Option<(String, Instant)>,
 }
@@ -58,6 +64,8 @@ impl App {
             active_group: None,
             active_window: None,
             parser: Arc::new(Mutex::new(vt100::Parser::new(rows.saturating_sub(1), cols, 1000))),
+            rename_buf: String::new(),
+            rename_target: None,
             status_message: None,
         })
     }

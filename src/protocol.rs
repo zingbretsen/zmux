@@ -43,6 +43,8 @@ pub enum ClientMsg {
     NewWorktreeGroup { branch: String },
     /// Remove the active group's worktree and delete the group
     CloseGroup { force: bool },
+    /// Rename a node (project, group, or window)
+    Rename { id: NodeId, name: String },
     /// Close the active window
     CloseWindow,
     /// Shut down the server

@@ -105,8 +105,20 @@ impl ClientConnection {
         self.send(ClientMsg::MoveWindowToNewGroup).await
     }
 
+    pub async fn rename(&self, id: NodeId, name: String) -> Result<()> {
+        self.send(ClientMsg::Rename { id, name }).await
+    }
+
     pub async fn close_window(&self) -> Result<()> {
         self.send(ClientMsg::CloseWindow).await
+    }
+
+    pub async fn new_worktree_group(&self, branch: String) -> Result<()> {
+        self.send(ClientMsg::NewWorktreeGroup { branch }).await
+    }
+
+    pub async fn close_group(&self, force: bool) -> Result<()> {
+        self.send(ClientMsg::CloseGroup { force }).await
     }
 
     pub async fn detach(&self) -> Result<()> {
