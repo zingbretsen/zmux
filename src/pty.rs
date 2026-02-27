@@ -43,7 +43,9 @@ impl PtyHandle {
         let child_pid = child.process_id();
         drop(pair.slave);
 
-        let writer = pair.master.take_writer()?;
+        let mut writer = pair.master.take_writer()?;
+        // Clear the screen so the new shell doesn't show leftover terminal content
+        writer.write_all(b"\x1b[2J\x1b[H")?;
         let mut reader = pair.master.try_clone_reader()?;
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
 
