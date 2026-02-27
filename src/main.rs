@@ -95,8 +95,21 @@ async fn ensure_server(preset: Option<&str>) -> Result<()> {
     anyhow::bail!("Server failed to start within 5 seconds")
 }
 
+fn restore_terminal() {
+    let _ = stdout().execute(DisableMouseCapture);
+    let _ = terminal::disable_raw_mode();
+    let _ = stdout().execute(LeaveAlternateScreen);
+}
+
 async fn run_client() -> Result<()> {
     let conn = client::ClientConnection::connect().await?;
+
+    // Install panic hook to restore terminal on panic
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
 
     terminal::enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -109,9 +122,7 @@ async fn run_client() -> Result<()> {
 
     let result = run_loop(&mut terminal, &mut app).await;
 
-    stdout().execute(DisableMouseCapture)?;
-    terminal::disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    restore_terminal();
 
     result
 }
