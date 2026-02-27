@@ -116,6 +116,7 @@ async fn run_client() -> Result<()> {
     stdout().execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
     let size = terminal.size()?;
     let mut app = App::new(conn, size.height, size.width).await?;

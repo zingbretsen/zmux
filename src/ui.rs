@@ -553,6 +553,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Map a column position on the tab bar to a clickable tab entry.
+/// Click targets are forgiving: separators and empty space map to the nearest tab.
 pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
     let active_proj_idx = app.active_project
         .and_then(|id| app.projects.iter().position(|e| e.id == id))
@@ -571,7 +572,12 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
         return Some(TabClick::Project(active_proj_idx));
     }
     x += proj_span;
-    x += 3; // " > "
+
+    // " > " separator — attribute to project
+    if col < x + 3 {
+        return Some(TabClick::Project(active_proj_idx));
+    }
+    x += 3;
 
     // Group: "{name}"
     let active_grp_idx = app.active_group
@@ -579,17 +585,25 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
         .unwrap_or(0);
     let grp_name = app.groups.get(active_grp_idx).map(|e| e.name.as_str()).unwrap_or("?");
     let grp_span = grp_name.len();
-    if col >= x && col < x + grp_span {
+    if col < x + grp_span {
         return Some(TabClick::Group(active_grp_idx));
     }
     x += grp_span;
 
-    // Layout indicator
+    // Layout indicator — attribute to group
     if app.layout_mode == LayoutMode::Tiled {
-        x += 2 + app.tile_layout.name().len() + 1; // " [name]"
+        let layout_span = 2 + app.tile_layout.name().len() + 1; // " [name]"
+        if col < x + layout_span {
+            return Some(TabClick::Group(active_grp_idx));
+        }
+        x += layout_span;
     }
 
-    x += 3; // " > "
+    // " > " separator — attribute to group
+    if col < x + 3 {
+        return Some(TabClick::Group(active_grp_idx));
+    }
+    x += 3;
 
     // Windows — replicate visible_tab_range logic
     let nav = matches!(app.mode, Mode::Nav);
@@ -604,12 +618,26 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
 
     let (start, end) = visible_tab_range(&tab_widths, active_win_idx, avail_width);
 
+    if app.windows.is_empty() {
+        return None;
+    }
+
     if start > 0 {
         x += 2; // "< "
     }
+
+    let mut last_window_idx = start;
     for i in start..end {
         if i > start {
-            x += 3; // " | "
+            // " | " separator — left half goes to previous tab, right half to next
+            if col >= x && col < x + 3 {
+                return if col < x + 2 {
+                    Some(TabClick::Window(i - 1))
+                } else {
+                    Some(TabClick::Window(i))
+                };
+            }
+            x += 3;
         }
         let tile_len = if app.tiled_windows.contains(&app.windows[i].id) { 1 } else { 0 };
         let name_len = app.windows[i].name.len();
@@ -618,9 +646,11 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
             return Some(TabClick::Window(i));
         }
         x += tile_len + name_len + ai_len;
+        last_window_idx = i;
     }
 
-    None
+    // Empty space after all tabs — select the last visible window
+    Some(TabClick::Window(last_window_idx))
 }
 
 /// Given tab widths (each including its separator), find the [start, end) range
