@@ -348,13 +348,11 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         // Toggle layout mode (Stacked ↔ Tiled)
         KeyCode::Char('t') => {
             app.conn.toggle_layout().await?;
-            app.mode = Mode::Normal;
         }
 
         // Cycle tile layout algorithm
         KeyCode::Char('T') => {
             app.conn.cycle_layout().await?;
-            app.mode = Mode::Normal;
         }
 
         // Toggle current window in/out of tile set
@@ -362,7 +360,6 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             if let Some(wid) = app.active_window {
                 app.conn.toggle_tile(wid).await?;
             }
-            app.mode = Mode::Normal;
         }
 
         _ => {}
