@@ -43,7 +43,7 @@ impl PtyHandle {
         let child_pid = child.process_id();
         drop(pair.slave);
 
-        let mut writer = pair.master.take_writer()?;
+        let writer = pair.master.take_writer()?;
         let mut reader = pair.master.try_clone_reader()?;
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
 
