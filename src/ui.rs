@@ -1,7 +1,8 @@
 use crate::app::{App, Mode, TabLevel};
-use crate::protocol::{LayoutMode, TileLayout};
+use crate::protocol::{LayoutMode, NodeId, TileLayout};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use std::collections::HashMap;
 use std::time::Duration;
 use tui_term::widget::PseudoTerminal;
 
@@ -117,6 +118,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
 
  AI Nav: h/l to cycle, Esc to exit
  Tiled: Ctrl+h/j/k/l to move focus
+ Tiled: Shift+arrows to resize pane
 
  Press any key to close";
 
@@ -259,7 +261,7 @@ fn draw_tiled(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let rects = compute_tile_rects(app.tile_layout, n, area);
+    let rects = compute_tile_rects(app.tile_layout, windows, area, &app.pane_weights);
 
     for (i, &wid) in windows.iter().enumerate() {
         if i >= rects.len() {
@@ -303,8 +305,9 @@ fn draw_tiled(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Compute rects for each tiled pane within the given area
-fn compute_tile_rects(layout: TileLayout, n: usize, area: Rect) -> Vec<Rect> {
+/// Compute rects for each tiled pane within the given area, using per-pane weights.
+fn compute_tile_rects(layout: TileLayout, windows: &[NodeId], area: Rect, weights: &HashMap<NodeId, (f64, f64)>) -> Vec<Rect> {
+    let n = windows.len();
     if n == 0 {
         return Vec::new();
     }
@@ -312,33 +315,59 @@ fn compute_tile_rects(layout: TileLayout, n: usize, area: Rect) -> Vec<Rect> {
         return vec![area];
     }
 
+    // Convert float weights to integer ratios for Constraint::Ratio
+    // Multiply by 100 and round to get integer proportions
+    let w_ratios: Vec<u32> = windows.iter()
+        .map(|&id| (weights.get(&id).map_or(1.0, |&(w, _)| w) * 100.0).round() as u32)
+        .collect();
+    let h_ratios: Vec<u32> = windows.iter()
+        .map(|&id| (weights.get(&id).map_or(1.0, |&(_, h)| h) * 100.0).round() as u32)
+        .collect();
+
     match layout {
         TileLayout::EqualColumns => {
+            let total: u32 = w_ratios.iter().sum();
+            let constraints: Vec<Constraint> = w_ratios.iter()
+                .map(|&r| Constraint::Ratio(r, total))
+                .collect();
             Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Ratio(1, n as u32); n])
+                .constraints(constraints)
                 .split(area)
                 .to_vec()
         }
         TileLayout::EqualRows => {
+            let total: u32 = h_ratios.iter().sum();
+            let constraints: Vec<Constraint> = h_ratios.iter()
+                .map(|&r| Constraint::Ratio(r, total))
+                .collect();
             Layout::default()
                 .direction(Direction::Vertical)
-                .constraints(vec![Constraint::Ratio(1, n as u32); n])
+                .constraints(constraints)
                 .split(area)
                 .to_vec()
         }
         TileLayout::MainLeft => {
+            let main_w = w_ratios[0];
+            // Average the side pane widths for the horizontal split
+            let side_avg: u32 = if n > 1 { w_ratios[1..].iter().sum::<u32>() / (n - 1) as u32 } else { 100 };
+            let total_w = main_w + side_avg;
             let horiz = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .constraints([Constraint::Ratio(main_w, total_w), Constraint::Ratio(side_avg, total_w)])
                 .split(area);
             let mut rects = vec![horiz[0]];
             let side_count = n - 1;
+            let side_h_ratios: Vec<u32> = h_ratios[1..].to_vec();
+            let side_total: u32 = side_h_ratios.iter().sum();
+            let constraints: Vec<Constraint> = side_h_ratios.iter()
+                .map(|&r| Constraint::Ratio(r, side_total))
+                .collect();
             let side_rects = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints(vec![Constraint::Ratio(1, side_count as u32); side_count])
+                .constraints(constraints)
                 .split(horiz[1]);
-            rects.extend(side_rects.iter());
+            rects.extend(side_rects.iter().take(side_count));
             rects
         }
         TileLayout::Grid => {

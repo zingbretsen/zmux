@@ -41,6 +41,8 @@ struct GroupNode {
     tile_layout: TileLayout,
     /// Windows marked for tiling (subset of children)
     tiled_windows: Vec<NodeId>,
+    /// Per-window size weights for tiled layout (width_weight, height_weight), default (1.0, 1.0)
+    pane_weights: HashMap<NodeId, (f64, f64)>,
 }
 
 struct WindowNode {
@@ -95,6 +97,7 @@ impl SessionTree {
             name, parent, children: Vec::new(), working_dir, worktree_path,
             layout_mode: LayoutMode::Stacked, tile_layout: TileLayout::EqualColumns,
             tiled_windows: Vec::new(),
+            pane_weights: HashMap::new(),
         }));
         if let Some(Node::Project(p)) = self.nodes.get_mut(&parent) {
             p.children.push(id);
@@ -297,14 +300,15 @@ impl SessionTree {
             } else { Vec::new() }
         } else { Vec::new() };
 
-        let (layout_mode, tile_layout, tiled_windows) = if let Some(gid) = self.active_group {
+        let (layout_mode, tile_layout, tiled_windows, pane_weights) = if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                (g.layout_mode, g.tile_layout, g.tiled_windows.clone())
+                let weights: Vec<(NodeId, f64, f64)> = g.pane_weights.iter().map(|(&id, &(w, h))| (id, w, h)).collect();
+                (g.layout_mode, g.tile_layout, g.tiled_windows.clone(), weights)
             } else {
-                (LayoutMode::Stacked, TileLayout::EqualColumns, Vec::new())
+                (LayoutMode::Stacked, TileLayout::EqualColumns, Vec::new(), Vec::new())
             }
         } else {
-            (LayoutMode::Stacked, TileLayout::EqualColumns, Vec::new())
+            (LayoutMode::Stacked, TileLayout::EqualColumns, Vec::new(), Vec::new())
         };
 
         ServerMsg::TabState {
@@ -312,7 +316,7 @@ impl SessionTree {
             active_project: self.active_project,
             active_group: self.active_group,
             active_window: self.active_window,
-            layout_mode, tile_layout, tiled_windows,
+            layout_mode, tile_layout, tiled_windows, pane_weights,
         }
     }
 
@@ -562,6 +566,29 @@ impl SessionTree {
         self.active_window = Some(tiled[new_idx]);
     }
 
+    fn resize_pane(&mut self, direction: PaneDirection) {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return,
+        };
+        let wid = match self.active_window {
+            Some(wid) => wid,
+            None => return,
+        };
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if g.layout_mode != LayoutMode::Tiled || !g.tiled_windows.contains(&wid) {
+                return;
+            }
+            let (w, h) = g.pane_weights.entry(wid).or_insert((1.0, 1.0));
+            match direction {
+                PaneDirection::Left => *w = (*w - 0.1).max(0.2),
+                PaneDirection::Right => *w = (*w + 0.1).min(5.0),
+                PaneDirection::Up => *h = (*h + 0.1).min(5.0),
+                PaneDirection::Down => *h = (*h - 0.1).max(0.2),
+            }
+        }
+    }
+
     /// Returns true if the active group is in tiled mode and a window is tiled
     fn is_tiled_window(&self, window_id: NodeId) -> bool {
         if let Some(gid) = self.active_group {
@@ -588,7 +615,7 @@ impl SessionTree {
         let tiled_sizes = if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
                 if g.layout_mode == LayoutMode::Tiled && !g.tiled_windows.is_empty() {
-                    Some(pane_sizes(g.tile_layout, &g.tiled_windows, rows, cols))
+                    Some(pane_sizes(g.tile_layout, &g.tiled_windows, rows, cols, &g.pane_weights))
                 } else {
                     None
                 }
@@ -698,8 +725,8 @@ impl SessionTree {
 }
 
 /// Compute pane sizes for a tile layout. Returns (window_id, rows, cols) for each tiled window.
-/// Accounts for 1-column borders between panes.
-fn pane_sizes(layout: TileLayout, windows: &[NodeId], total_rows: u16, total_cols: u16) -> Vec<(NodeId, u16, u16)> {
+/// Accounts for 1-column borders between panes. Uses per-window weights for proportional sizing.
+fn pane_sizes(layout: TileLayout, windows: &[NodeId], total_rows: u16, total_cols: u16, weights: &HashMap<NodeId, (f64, f64)>) -> Vec<(NodeId, u16, u16)> {
     let n = windows.len();
     if n == 0 {
         return Vec::new();
@@ -708,44 +735,54 @@ fn pane_sizes(layout: TileLayout, windows: &[NodeId], total_rows: u16, total_col
         return vec![(windows[0], total_rows, total_cols)];
     }
 
+    // Helper: distribute `usable` pixels among items proportional to their weights
+    let distribute = |usable: u16, items: &[NodeId], get_weight: &dyn Fn(NodeId) -> f64| -> Vec<u16> {
+        let total_weight: f64 = items.iter().map(|&id| get_weight(id)).sum();
+        let mut sizes = Vec::with_capacity(items.len());
+        let mut used: u16 = 0;
+        for (i, &id) in items.iter().enumerate() {
+            if i == items.len() - 1 {
+                // Last item gets remainder to avoid rounding gaps
+                sizes.push(usable.saturating_sub(used));
+            } else {
+                let s = ((usable as f64) * get_weight(id) / total_weight).round() as u16;
+                sizes.push(s);
+                used += s;
+            }
+        }
+        sizes
+    };
+
+    let w_weight = |id: NodeId| -> f64 { weights.get(&id).map_or(1.0, |&(w, _)| w) };
+    let h_weight = |id: NodeId| -> f64 { weights.get(&id).map_or(1.0, |&(_, h)| h) };
+
     match layout {
         TileLayout::EqualColumns => {
-            // Each pane gets equal width, 1-col border between them
             let borders = (n - 1) as u16;
             let usable = total_cols.saturating_sub(borders);
-            let base_w = usable / n as u16;
-            let extra = (usable % n as u16) as usize;
-            let mut result = Vec::new();
-            for (i, &wid) in windows.iter().enumerate() {
-                let w = base_w + if i < extra { 1 } else { 0 };
-                result.push((wid, total_rows, w));
-            }
-            result
+            let widths = distribute(usable, windows, &w_weight);
+            windows.iter().zip(widths).map(|(&wid, w)| (wid, total_rows, w)).collect()
         }
         TileLayout::EqualRows => {
             let borders = (n - 1) as u16;
             let usable = total_rows.saturating_sub(borders);
-            let base_h = usable / n as u16;
-            let extra = (usable % n as u16) as usize;
-            let mut result = Vec::new();
-            for (i, &wid) in windows.iter().enumerate() {
-                let h = base_h + if i < extra { 1 } else { 0 };
-                result.push((wid, h, total_cols));
-            }
-            result
+            let heights = distribute(usable, windows, &h_weight);
+            windows.iter().zip(heights).map(|(&wid, h)| (wid, h, total_cols)).collect()
         }
         TileLayout::MainLeft => {
-            // First window gets 60% width, rest share the right side stacked
-            let main_cols = (total_cols as f64 * 0.6) as u16;
-            let side_cols = total_cols.saturating_sub(main_cols + 1); // 1-col border
+            // First window and side panes split width by weight
+            let main_w = w_weight(windows[0]);
+            let side_total_w: f64 = windows[1..].iter().map(|&id| w_weight(id)).sum::<f64>() / (n - 1) as f64;
+            let total_w = main_w + side_total_w;
+            let main_cols = ((total_cols.saturating_sub(1) as f64) * main_w / total_w).round() as u16;
+            let side_cols = total_cols.saturating_sub(main_cols + 1);
             let mut result = vec![(windows[0], total_rows, main_cols)];
             let side_count = n - 1;
             let borders = if side_count > 1 { (side_count - 1) as u16 } else { 0 };
             let usable_h = total_rows.saturating_sub(borders);
-            let base_h = usable_h / side_count as u16;
-            let extra = (usable_h % side_count as u16) as usize;
-            for (i, &wid) in windows[1..].iter().enumerate() {
-                let h = base_h + if i < extra { 1 } else { 0 };
+            let side_windows = &windows[1..];
+            let heights = distribute(usable_h, side_windows, &h_weight);
+            for (&wid, h) in side_windows.iter().zip(heights) {
                 result.push((wid, h, side_cols));
             }
             result
@@ -1469,6 +1506,27 @@ async fn handle_client(
                 st.session.focus_pane(direction);
                 let tab = st.session.tab_state();
                 let _ = client_tx.send(tab);
+            }
+            ClientMsg::ResizePane { direction } => {
+                st.session.resize_pane(direction);
+                let (cols, rows) = st.term_size;
+                let term_rows = rows.saturating_sub(1);
+                let _ = st.session.resize_all(term_rows, cols);
+                let tab = st.session.tab_state();
+                let _ = client_tx.send(tab);
+                // Send screen dumps for all tiled windows
+                if let Some(gid) = st.session.active_group {
+                    if let Some(Node::Group(g)) = st.session.nodes.get(&gid) {
+                        if g.layout_mode == LayoutMode::Tiled {
+                            let tw = g.tiled_windows.clone();
+                            for wid in tw {
+                                if let Some(data) = st.session.screen_dump(wid) {
+                                    let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                                }
+                            }
+                        }
+                    }
+                }
             }
             ClientMsg::InputToWindow { window_id, data } => {
                 if let Some(Node::Window(w)) = st.session.nodes.get_mut(&window_id) {

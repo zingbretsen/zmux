@@ -221,6 +221,20 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.should_detach = true;
         }
 
+        // Resize active pane in tiled mode (Shift+Arrow)
+        KeyCode::Left if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) => {
+            app.conn.resize_pane(PaneDirection::Left).await?;
+        }
+        KeyCode::Right if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) => {
+            app.conn.resize_pane(PaneDirection::Right).await?;
+        }
+        KeyCode::Up if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) => {
+            app.conn.resize_pane(PaneDirection::Up).await?;
+        }
+        KeyCode::Down if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) => {
+            app.conn.resize_pane(PaneDirection::Down).await?;
+        }
+
         KeyCode::Char('k') | KeyCode::Up => {
             app.tab_focus = match app.tab_focus {
                 TabLevel::Window => TabLevel::Group,

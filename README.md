@@ -49,6 +49,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `t` | Toggle layout mode (Stacked ↔ Tiled) |
 | `T` | Cycle tile layout (columns → rows → main-left → grid) |
 | `m` | Toggle current window in/out of tile set |
+| `Shift+Arrow` | Resize active pane (Left/Right=width, Up/Down=height) |
 | `?` | Show help overlay |
 
 ### Copy Mode

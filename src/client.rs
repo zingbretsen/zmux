@@ -165,6 +165,10 @@ impl ClientConnection {
         self.send(ClientMsg::FocusPane { direction }).await
     }
 
+    pub async fn resize_pane(&self, direction: PaneDirection) -> Result<()> {
+        self.send(ClientMsg::ResizePane { direction }).await
+    }
+
     pub async fn send_input_to_window(&self, window_id: NodeId, data: Vec<u8>) -> Result<()> {
         self.send(ClientMsg::InputToWindow { window_id, data }).await
     }

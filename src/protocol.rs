@@ -109,6 +109,8 @@ pub enum ClientMsg {
     FocusPane { direction: PaneDirection },
     /// Send input to a specific window (used in tiled mode)
     InputToWindow { window_id: NodeId, data: Vec<u8> },
+    /// Resize the active pane in tiled mode
+    ResizePane { direction: PaneDirection },
     /// Shut down the server
     Shutdown,
 }
@@ -131,6 +133,7 @@ pub enum ServerMsg {
         layout_mode: LayoutMode,
         tile_layout: TileLayout,
         tiled_windows: Vec<NodeId>,
+        pane_weights: Vec<(NodeId, f64, f64)>,
     },
     /// Error
     Error { message: String },

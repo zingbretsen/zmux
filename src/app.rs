@@ -45,6 +45,7 @@ pub struct App {
     pub layout_mode: LayoutMode,
     pub tile_layout: TileLayout,
     pub tiled_windows: Vec<NodeId>,
+    pub pane_weights: HashMap<NodeId, (f64, f64)>,
 
     // Client-side vt100 parsers keyed by window ID
     pub parsers: HashMap<NodeId, Arc<Mutex<vt100::Parser>>>,
@@ -96,6 +97,7 @@ impl App {
             layout_mode: LayoutMode::Stacked,
             tile_layout: TileLayout::EqualColumns,
             tiled_windows: Vec::new(),
+            pane_weights: HashMap::new(),
             parsers: HashMap::new(),
             term_rows,
             term_cols: cols,
@@ -129,7 +131,7 @@ impl App {
 
     pub fn apply_server_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::TabState { projects, groups, windows, active_project, active_group, active_window, layout_mode, tile_layout, tiled_windows } => {
+            ServerMsg::TabState { projects, groups, windows, active_project, active_group, active_window, layout_mode, tile_layout, tiled_windows, pane_weights } => {
                 self.projects = projects;
                 self.groups = groups;
                 self.windows = windows;
@@ -139,6 +141,7 @@ impl App {
                 self.layout_mode = layout_mode;
                 self.tile_layout = tile_layout;
                 self.tiled_windows = tiled_windows;
+                self.pane_weights = pane_weights.into_iter().map(|(id, w, h)| (id, (w, h))).collect();
 
                 // Clean up parsers for windows that no longer exist
                 let window_ids: Vec<NodeId> = self.windows.iter().map(|e| e.id).collect();
