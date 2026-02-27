@@ -20,6 +20,7 @@ impl PtyHandle {
         cols: u16,
         cwd: &Path,
         env: &HashMap<String, String>,
+        shell_override: Option<&str>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<Vec<u8>>)> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -29,7 +30,9 @@ impl PtyHandle {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = shell_override
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(cwd);
         for (k, v) in env {

@@ -32,6 +32,19 @@ pub struct WindowPreset {
     pub command: Option<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Config {
+    pub shell: Option<String>,
+}
+
+pub fn load_config() -> Config {
+    let path = dirs_or_default().join("config.toml");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => toml::from_str(&content).unwrap_or_default(),
+        Err(_) => Config::default(),
+    }
+}
+
 fn presets_dir() -> PathBuf {
     let config = dirs_or_default();
     config.join("presets")

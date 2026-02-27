@@ -19,6 +19,7 @@ struct SessionTree {
     active_project: Option<NodeId>,
     active_group: Option<NodeId>,
     active_window: Option<NodeId>,
+    shell: Option<String>,
 }
 
 struct ProjectNode {
@@ -60,6 +61,7 @@ impl SessionTree {
             active_project: None,
             active_group: None,
             active_window: None,
+            shell: None,
         }
     }
 
@@ -117,7 +119,7 @@ impl SessionTree {
             }
         }
 
-        let (pty, mut pty_rx) = PtyHandle::spawn_in(rows, cols, &working_dir, &env)?;
+        let (pty, mut pty_rx) = PtyHandle::spawn_in(rows, cols, &working_dir, &env, self.shell.as_deref())?;
 
         // Forward raw PTY bytes with window ID
         let win_id = id;
@@ -539,7 +541,9 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
     let listener = UnixListener::bind(&sock_path)?;
     eprintln!("zmux server listening on {}", sock_path.display());
 
+    let user_config = config::load_config();
     let mut session = SessionTree::new();
+    session.shell = user_config.shell;
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<(NodeId, Vec<u8>)>();
 
     let default_rows: u16 = 24;
