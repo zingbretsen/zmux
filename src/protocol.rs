@@ -51,6 +51,8 @@ pub enum ClientMsg {
     MergeIntoMain,
     /// Close the active window
     CloseWindow,
+    /// Search all windows for text content
+    SearchWindows { query: String },
     /// Shut down the server
     Shutdown,
 }

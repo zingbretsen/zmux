@@ -8,6 +8,8 @@ use std::time::Instant;
 pub enum Mode {
     Normal,
     Nav,
+    Copy,
+    Search,
     AiNav,
     Rename,
     BranchInput,
@@ -44,6 +46,9 @@ pub struct App {
     pub rename_buf: String,
     pub rename_target: Option<NodeId>,
 
+    // Copy mode scroll offset
+    pub copy_scroll_offset: usize,
+
     // Status message shown briefly in the tab bar
     pub status_message: Option<(String, Instant)>,
 }
@@ -67,6 +72,7 @@ impl App {
             parser: Arc::new(Mutex::new(vt100::Parser::new(rows.saturating_sub(1), cols, 1000))),
             rename_buf: String::new(),
             rename_target: None,
+            copy_scroll_offset: 0,
             status_message: None,
         })
     }

@@ -11,7 +11,7 @@ mod worktree;
 use anyhow::Result;
 use app::{App, Mode, TabLevel};
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{Event, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -165,6 +165,8 @@ async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<(
         Mode::Nav => handle_nav_key(app, key).await,
         Mode::AiNav => handle_ai_nav_key(app, key).await,
         Mode::Rename => handle_rename_key(app, key).await,
+        Mode::Copy => handle_copy_key(app, key).await,
+        Mode::Search => handle_search_key(app, key).await,
         Mode::BranchInput => handle_branch_input_key(app, key).await,
         Mode::Help => {
             app.mode = Mode::Normal;
@@ -294,6 +296,18 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Normal;
         }
 
+        // Search across windows
+        KeyCode::Char('/') => {
+            app.rename_buf.clear();
+            app.mode = Mode::Search;
+        }
+
+        // Enter copy mode
+        KeyCode::Char('[') => {
+            app.copy_scroll_offset = 0;
+            app.mode = Mode::Copy;
+        }
+
         // Close group (with worktree cleanup)
         KeyCode::Char('X') => {
             app.conn.close_group(false).await?;
@@ -379,7 +393,97 @@ async fn handle_branch_input_key(app: &mut App, key: &crossterm::event::KeyEvent
     Ok(())
 }
 
+async fn handle_search_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.rename_buf.clear();
+            app.mode = Mode::Nav;
+        }
+        KeyCode::Enter => {
+            if !app.rename_buf.is_empty() {
+                app.conn.search_windows(app.rename_buf.clone()).await?;
+            }
+            app.rename_buf.clear();
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.rename_buf.pop();
+        }
+        KeyCode::Char(c) => {
+            app.rename_buf.push(c);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let half_page = (app.last_size.1 / 2) as usize;
+
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => {
+            app.copy_scroll_offset = 0;
+            app.parser.lock().unwrap().set_scrollback(0);
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(1).min(1000);
+            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(1);
+            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+        }
+        KeyCode::Char('u') if ctrl => {
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(half_page).min(1000);
+            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+        }
+        KeyCode::Char('d') if ctrl => {
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(half_page);
+            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+        }
+        KeyCode::Char('g') => {
+            app.copy_scroll_offset = 1000;
+            app.parser.lock().unwrap().set_scrollback(app.copy_scroll_offset);
+        }
+        KeyCode::Char('G') => {
+            app.copy_scroll_offset = 0;
+            app.parser.lock().unwrap().set_scrollback(0);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -> Result<()> {
+    // Tab bar clicks work in any mode
+    if mouse.row == 0 {
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if let Some(click) = ui::tab_click_at(app, mouse.column) {
+                match click {
+                    ui::TabClick::Project(idx) => {
+                        if let Some(entry) = app.projects.get(idx) {
+                            app.conn.select_project(entry.id).await?;
+                        }
+                    }
+                    ui::TabClick::Group(idx) => {
+                        if let Some(entry) = app.groups.get(idx) {
+                            app.conn.select_group(entry.id).await?;
+                        }
+                    }
+                    ui::TabClick::Window(idx) => {
+                        if let Some(entry) = app.windows.get(idx) {
+                            app.conn.select_window(entry.id).await?;
+                        }
+                    }
+                }
+                app.mode = Mode::Normal;
+            }
+            return Ok(());
+        }
+    }
+
     if app.mode != Mode::Normal {
         return Ok(());
     }

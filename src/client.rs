@@ -129,6 +129,10 @@ impl ClientConnection {
         self.send(ClientMsg::CloseGroup { force }).await
     }
 
+    pub async fn search_windows(&self, query: String) -> Result<()> {
+        self.send(ClientMsg::SearchWindows { query }).await
+    }
+
     pub async fn detach(&self) -> Result<()> {
         self.send(ClientMsg::Detach).await
     }

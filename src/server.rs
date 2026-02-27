@@ -19,6 +19,7 @@ struct SessionTree {
     active_project: Option<NodeId>,
     active_group: Option<NodeId>,
     active_window: Option<NodeId>,
+    shell: Option<String>,
 }
 
 struct ProjectNode {
@@ -60,6 +61,7 @@ impl SessionTree {
             active_project: None,
             active_group: None,
             active_window: None,
+            shell: None,
         }
     }
 
@@ -117,7 +119,7 @@ impl SessionTree {
             }
         }
 
-        let (pty, mut pty_rx) = PtyHandle::spawn_in(rows, cols, &working_dir, &env)?;
+        let (pty, mut pty_rx) = PtyHandle::spawn_in(rows, cols, &working_dir, &env, self.shell.as_deref())?;
 
         // Forward raw PTY bytes with window ID
         let win_id = id;
@@ -403,6 +405,45 @@ impl SessionTree {
         true
     }
 
+    /// Search all windows' screen content for a query string (case-insensitive).
+    /// Returns (project_id, group_id, window_id, window_name) of first match.
+    fn search_windows(&self, query: &str) -> Option<(NodeId, NodeId, NodeId, String)> {
+        let query_lower = query.to_lowercase();
+        for &pid in &self.root_children {
+            if let Some(Node::Project(p)) = self.nodes.get(&pid) {
+                for &gid in &p.children {
+                    if let Some(Node::Group(g)) = self.nodes.get(&gid) {
+                        for &wid in &g.children {
+                            if let Some(Node::Window(w)) = self.nodes.get(&wid) {
+                                let parser = w.pty.parser.lock().unwrap();
+                                let screen = parser.screen();
+                                let (rows, cols) = screen.size();
+                                let mut text = String::new();
+                                for row in 0..rows {
+                                    for col in 0..cols {
+                                        if let Some(cell) = screen.cell(row, col) {
+                                            let c = cell.contents();
+                                            if c.is_empty() {
+                                                text.push(' ');
+                                            } else {
+                                                text.push_str(&c);
+                                            }
+                                        }
+                                    }
+                                    text.push('\n');
+                                }
+                                if text.to_lowercase().contains(&query_lower) {
+                                    return Some((pid, gid, wid, w.name.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
         for node in self.nodes.values() {
             if let Node::Window(w) = node {
@@ -539,7 +580,9 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
     let listener = UnixListener::bind(&sock_path)?;
     eprintln!("zmux server listening on {}", sock_path.display());
 
+    let user_config = config::load_config();
     let mut session = SessionTree::new();
+    session.shell = user_config.shell;
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<(NodeId, Vec<u8>)>();
 
     let default_rows: u16 = 24;
@@ -1099,6 +1142,28 @@ async fn handle_client(
                         if let Some(data) = st.session.screen_dump(wid) {
                             let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
                         }
+                    }
+                }
+            }
+            ClientMsg::SearchWindows { query } => {
+                match st.session.search_windows(&query) {
+                    Some((pid, gid, wid, name)) => {
+                        st.session.active_project = Some(pid);
+                        st.session.active_group = Some(gid);
+                        st.session.active_window = Some(wid);
+                        let tab = st.session.tab_state();
+                        let _ = client_tx.send(tab);
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        }
+                        let _ = client_tx.send(ServerMsg::Info {
+                            message: format!("Found in: {}", name),
+                        });
+                    }
+                    None => {
+                        let _ = client_tx.send(ServerMsg::Info {
+                            message: "No match found".to_string(),
+                        });
                     }
                 }
             }
