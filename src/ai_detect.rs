@@ -85,7 +85,11 @@ pub fn detect(child_pid: u32, prev_status: Option<&AiStatus>, prev_cpu_time: u64
         total_cpu += read_cpu_time(*pid).unwrap_or(0);
     }
 
-    let status = if total_cpu > prev_cpu_time && prev_cpu_time > 0 {
+    // Use a threshold to distinguish real work from background noise (node.js event loop, etc.)
+    // CPU time is in clock ticks (typically 100Hz). With 3s polling interval, require >10 ticks
+    // (~0.1s of CPU) to count as actively running.
+    let cpu_delta = total_cpu.saturating_sub(prev_cpu_time);
+    let status = if cpu_delta > 10 && prev_cpu_time > 0 {
         AiStatus::Running {
             tool: tool_name.to_string(),
             pid: tool_pid,
