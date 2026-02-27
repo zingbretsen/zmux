@@ -574,21 +574,17 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let half_page = (app.last_size.1 / 2) as usize;
 
-    let max_scrollback = |app: &App| -> usize {
+    let set_scrollback = |app: &mut App, offset: usize| -> usize {
         if let Some(wid) = app.active_window {
             if let Some(parser) = app.parser_for(wid) {
-                return parser.lock().unwrap().screen().scrollback();
+                let mut p = parser.lock().unwrap();
+                let rows = p.screen().size().0 as usize;
+                let clamped = offset.min(rows);
+                p.set_scrollback(clamped);
+                return p.screen().scrollback();
             }
         }
         0
-    };
-
-    let set_scrollback = |app: &mut App, offset: usize| {
-        if let Some(wid) = app.active_window {
-            if let Some(parser) = app.parser_for(wid) {
-                parser.lock().unwrap().set_scrollback(offset);
-            }
-        }
     };
 
     match key.code {
@@ -598,26 +594,29 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
             app.mode = Mode::Normal;
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            let max = max_scrollback(app);
-            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(1).min(max);
-            set_scrollback(app, app.copy_scroll_offset);
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(1);
+            app.copy_scroll_offset = set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('j') | KeyCode::Down => {
             app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(1);
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('u') if ctrl => {
-            let max = max_scrollback(app);
-            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(half_page).min(max);
-            set_scrollback(app, app.copy_scroll_offset);
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(half_page);
+            app.copy_scroll_offset = set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('d') if ctrl => {
             app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(half_page);
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('g') => {
-            app.copy_scroll_offset = max_scrollback(app);
-            set_scrollback(app, app.copy_scroll_offset);
+            if let Some(wid) = app.active_window {
+                if let Some(parser) = app.parser_for(wid) {
+                    let rows = parser.lock().unwrap().screen().size().0 as usize;
+                    app.copy_scroll_offset = rows;
+                    app.copy_scroll_offset = set_scrollback(app, app.copy_scroll_offset);
+                }
+            }
         }
         KeyCode::Char('G') => {
             app.copy_scroll_offset = 0;
