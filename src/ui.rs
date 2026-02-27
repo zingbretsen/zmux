@@ -54,9 +54,24 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::styled(grp_name.to_string(), grp_style));
     spans.push(Span::styled(" > ", Style::default().fg(Color::DarkGray)));
 
-    // Windows
-    for (i, entry) in app.windows.iter().enumerate() {
-        if i > 0 {
+    // Windows - with horizontal scrolling to keep active tab visible
+    let prefix_width: usize = spans.iter().map(|s| s.content.len()).sum();
+    let suffix_width = if nav { 6 } else { 0 }; // " [NAV]"
+    let avail_width = (area.width as usize).saturating_sub(prefix_width + suffix_width);
+
+    // Calculate the character width of each window tab (including separator)
+    let tab_widths: Vec<usize> = app.windows.iter().enumerate().map(|(i, entry)| {
+        entry.name.len() + if i > 0 { 3 } else { 0 } // " | " separator
+    }).collect();
+
+    // Find the range of tabs to display, ensuring active tab is visible
+    let (start, end) = visible_tab_range(&tab_widths, active_win_idx, avail_width);
+
+    if start > 0 {
+        spans.push(Span::styled("< ", Style::default().fg(Color::DarkGray)));
+    }
+    for i in start..end {
+        if i > start {
             spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
         }
         let style = if i == active_win_idx {
@@ -68,11 +83,26 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(Color::White)
         };
-        spans.push(Span::styled(entry.name.clone(), style));
+        spans.push(Span::styled(app.windows[i].name.clone(), style));
+        // AI status indicator
+        if let Some(ref ai) = app.windows[i].ai_status {
+            let (symbol, color) = match ai {
+                crate::ai_detect::AiStatus::Running { .. } => ("●", Color::Green),
+                crate::ai_detect::AiStatus::Idle { .. } => ("◐", Color::Yellow),
+                crate::ai_detect::AiStatus::Finished { .. } => ("○", Color::DarkGray),
+            };
+            spans.push(Span::styled(symbol, Style::default().fg(color)));
+        }
+    }
+    if end < app.windows.len() {
+        spans.push(Span::styled(" >", Style::default().fg(Color::DarkGray)));
     }
 
     if nav {
         spans.push(Span::styled(" [NAV]", Style::default().fg(Color::Red).bold()));
+    }
+    if matches!(app.mode, Mode::AiNav) {
+        spans.push(Span::styled(" [AI]", Style::default().fg(Color::Green).bold()));
     }
 
     // Status message (shown for 3 seconds)
@@ -86,4 +116,54 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Given tab widths (each including its separator), find the [start, end) range
+/// that fits within `avail` columns and includes `active`.
+fn visible_tab_range(widths: &[usize], active: usize, avail: usize) -> (usize, usize) {
+    if widths.is_empty() {
+        return (0, 0);
+    }
+
+    // Width of displaying tabs [start..end) — first tab in range has no separator
+    let range_width = |start: usize, end: usize| -> usize {
+        let mut w = 0;
+        for i in start..end {
+            w += if i == start {
+                widths[i] - if i > 0 { 3 } else { 0 } // strip separator for first visible
+            } else {
+                widths[i]
+            };
+        }
+        // Account for scroll indicators
+        if start > 0 { w += 2; } // "< "
+        if end < widths.len() { w += 2; } // " >"
+        w
+    };
+
+    // Start with active tab, then expand outward
+    let mut start = active;
+    let mut end = active + 1;
+
+    if range_width(start, end) > avail {
+        return (start, end); // active tab alone doesn't fit, show it anyway
+    }
+
+    loop {
+        let prev_start = start;
+        let prev_end = end;
+        // Try expanding right
+        if end < widths.len() && range_width(start, end + 1) <= avail {
+            end += 1;
+        }
+        // Try expanding left
+        if start > 0 && range_width(start - 1, end) <= avail {
+            start -= 1;
+        }
+        if start == prev_start && end == prev_end {
+            break;
+        }
+    }
+
+    (start, end)
 }

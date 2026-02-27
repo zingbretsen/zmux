@@ -8,6 +8,7 @@ use std::time::Instant;
 pub enum Mode {
     Normal,
     Nav,
+    AiNav,
 }
 
 #[derive(Clone, Copy, PartialEq)]

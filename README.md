@@ -21,6 +21,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `h` / `Left` | Previous tab at current level |
 | `l` / `Right` | Next tab at current level |
 | `1`-`9` | Select tab by index |
+| `x` | Close active window |
 | `c` | Create new window |
-| `g` | Create new group |
-| `p` | Create new project |
+| `g` | Move current window to new group (named after cwd) |
+| `p` | Move current window to new project (named after cwd) |

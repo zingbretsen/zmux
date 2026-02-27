@@ -89,6 +89,26 @@ impl ClientConnection {
         self.send(ClientMsg::SavePreset { name }).await
     }
 
+    pub async fn next_ai_window(&self) -> Result<()> {
+        self.send(ClientMsg::NextAiWindow).await
+    }
+
+    pub async fn prev_ai_window(&self) -> Result<()> {
+        self.send(ClientMsg::PrevAiWindow).await
+    }
+
+    pub async fn move_window_to_new_project(&self) -> Result<()> {
+        self.send(ClientMsg::MoveWindowToNewProject).await
+    }
+
+    pub async fn move_window_to_new_group(&self) -> Result<()> {
+        self.send(ClientMsg::MoveWindowToNewGroup).await
+    }
+
+    pub async fn close_window(&self) -> Result<()> {
+        self.send(ClientMsg::CloseWindow).await
+    }
+
     pub async fn detach(&self) -> Result<()> {
         self.send(ClientMsg::Detach).await
     }

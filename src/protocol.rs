@@ -29,8 +29,20 @@ pub enum ClientMsg {
     SetGroupDir,
     /// Save current session tree as a preset
     SavePreset { name: Option<String> },
+    /// Cycle to the next window with an AI session (across all projects/groups)
+    NextAiWindow,
+    /// Cycle to the previous window with an AI session
+    PrevAiWindow,
     /// Detach (clean disconnect)
     Detach,
+    /// Move active window to a new project (named after window's cwd)
+    MoveWindowToNewProject,
+    /// Move active window to a new group (named after window's cwd)
+    MoveWindowToNewGroup,
+    /// Close the active window
+    CloseWindow,
+    /// Shut down the server
+    Shutdown,
 }
 
 // Server → Client
@@ -61,6 +73,8 @@ pub enum ServerMsg {
 pub struct TabEntry {
     pub id: NodeId,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_status: Option<crate::ai_detect::AiStatus>,
 }
 
 /// Socket path

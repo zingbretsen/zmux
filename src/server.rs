@@ -1,3 +1,4 @@
+use crate::ai_detect::{self, AiStatus};
 use crate::config;
 use crate::protocol::{self, ClientMsg, NodeId, ServerMsg, TabEntry};
 use crate::pty::PtyHandle;
@@ -38,6 +39,7 @@ struct WindowNode {
     #[allow(dead_code)]
     parent: NodeId,
     pty: PtyHandle,
+    ai_status: Option<AiStatus>,
 }
 
 enum Node {
@@ -126,7 +128,7 @@ impl SessionTree {
             let _ = pty_output_tx.send((win_id, Vec::new()));
         });
 
-        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty }));
+        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty, ai_status: None }));
         if let Some(Node::Group(g)) = self.nodes.get_mut(&parent) {
             g.children.push(id);
         }
@@ -165,6 +167,31 @@ impl SessionTree {
         }
     }
 
+    fn move_window_to_group(&mut self, window_id: NodeId, new_group_id: NodeId) {
+        // Remove from old parent
+        if let Some(Node::Window(w)) = self.nodes.get(&window_id) {
+            let old_parent = w.parent;
+            if let Some(Node::Group(g)) = self.nodes.get_mut(&old_parent) {
+                g.children.retain(|id| *id != window_id);
+            }
+        }
+        // Update parent and add to new group
+        if let Some(Node::Window(w)) = self.nodes.get_mut(&window_id) {
+            w.parent = new_group_id;
+        }
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&new_group_id) {
+            g.children.push(window_id);
+        }
+    }
+
+    fn window_cwd(&self, window_id: NodeId) -> Option<PathBuf> {
+        if let Some(Node::Window(w)) = self.nodes.get(&window_id) {
+            w.pty.cwd()
+        } else {
+            None
+        }
+    }
+
     fn window_working_dir(&self, group_id: NodeId) -> PathBuf {
         if let Some(Node::Group(g)) = self.nodes.get(&group_id) {
             if let Some(ref wd) = g.working_dir {
@@ -180,7 +207,7 @@ impl SessionTree {
     fn tab_state(&self) -> ServerMsg {
         let projects: Vec<TabEntry> = self.root_children.iter().filter_map(|id| {
             match self.nodes.get(id) {
-                Some(Node::Project(p)) => Some(TabEntry { id: *id, name: p.name.clone() }),
+                Some(Node::Project(p)) => Some(TabEntry { id: *id, name: p.name.clone(), ai_status: None }),
                 _ => None,
             }
         }).collect();
@@ -188,7 +215,7 @@ impl SessionTree {
         let groups: Vec<TabEntry> = if let Some(pid) = self.active_project {
             if let Some(Node::Project(p)) = self.nodes.get(&pid) {
                 p.children.iter().filter_map(|id| match self.nodes.get(id) {
-                    Some(Node::Group(g)) => Some(TabEntry { id: *id, name: g.name.clone() }),
+                    Some(Node::Group(g)) => Some(TabEntry { id: *id, name: g.name.clone(), ai_status: None }),
                     _ => None,
                 }).collect()
             } else { Vec::new() }
@@ -197,7 +224,11 @@ impl SessionTree {
         let windows: Vec<TabEntry> = if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
                 g.children.iter().filter_map(|id| match self.nodes.get(id) {
-                    Some(Node::Window(w)) => Some(TabEntry { id: *id, name: w.name.clone() }),
+                    Some(Node::Window(w)) => Some(TabEntry {
+                        id: *id,
+                        name: w.name.clone(),
+                        ai_status: w.ai_status.clone(),
+                    }),
                     _ => None,
                 }).collect()
             } else { Vec::new() }
@@ -241,6 +272,82 @@ impl SessionTree {
             Some(Node::Window(w)) => Some(w),
             _ => None,
         }
+    }
+
+    /// Poll all windows for AI tool processes. Returns true if any status changed.
+    fn poll_ai_status(&mut self) -> bool {
+        let window_ids: Vec<NodeId> = self.nodes.iter().filter_map(|(id, node)| {
+            matches!(node, Node::Window(_)).then_some(*id)
+        }).collect();
+
+        let mut changed = false;
+        for wid in window_ids {
+            if let Some(Node::Window(w)) = self.nodes.get_mut(&wid) {
+                let pid = match w.pty.child_pid {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let new_status = ai_detect::detect(pid, w.ai_status.as_ref());
+                if new_status != w.ai_status {
+                    w.ai_status = new_status;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Get all window IDs that have an AI session, in a stable order (by project/group/window).
+    fn ai_window_ids(&self) -> Vec<(NodeId, NodeId, NodeId)> {
+        // Returns (project_id, group_id, window_id) tuples
+        let mut result = Vec::new();
+        for &pid in &self.root_children {
+            if let Some(Node::Project(p)) = self.nodes.get(&pid) {
+                for &gid in &p.children {
+                    if let Some(Node::Group(g)) = self.nodes.get(&gid) {
+                        for &wid in &g.children {
+                            if let Some(Node::Window(w)) = self.nodes.get(&wid) {
+                                if w.ai_status.is_some() {
+                                    result.push((pid, gid, wid));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Navigate to the next/prev AI window across all projects/groups.
+    /// Returns true if navigation happened.
+    fn cycle_ai_window(&mut self, forward: bool) -> bool {
+        let ai_windows = self.ai_window_ids();
+        if ai_windows.is_empty() {
+            return false;
+        }
+
+        let current = self.active_window;
+        let current_idx = current.and_then(|wid| {
+            ai_windows.iter().position(|(_, _, w)| *w == wid)
+        });
+
+        let next_idx = match current_idx {
+            Some(idx) => {
+                if forward {
+                    (idx + 1) % ai_windows.len()
+                } else {
+                    (idx + ai_windows.len() - 1) % ai_windows.len()
+                }
+            }
+            None => 0, // Jump to first AI window
+        };
+
+        let (pid, gid, wid) = ai_windows[next_idx];
+        self.active_project = Some(pid);
+        self.active_group = Some(gid);
+        self.active_window = Some(wid);
+        true
     }
 
     fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
@@ -443,6 +550,23 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
             if let Some(ref tx) = st.client_tx {
                 if st.session.active_window == Some(window_id) {
                     let _ = tx.send(ServerMsg::PtyOutput { window_id, data });
+                }
+            }
+        }
+    });
+
+    // AI status polling task — every 3 seconds
+    let state_ai = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+        loop {
+            interval.tick().await;
+            let mut st = state_ai.lock().await;
+            let changed = st.session.poll_ai_status();
+            if changed {
+                if let Some(ref tx) = st.client_tx {
+                    let tab = st.session.tab_state();
+                    let _ = tx.send(tab);
                 }
             }
         }
@@ -681,7 +805,80 @@ async fn handle_client(
                     }
                 }
             }
+            ClientMsg::NextAiWindow => {
+                if st.session.cycle_ai_window(true) {
+                    let tab = st.session.tab_state();
+                    let _ = client_tx.send(tab);
+                    if let Some(wid) = st.session.active_window {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        }
+                    }
+                } else {
+                    let _ = client_tx.send(ServerMsg::Info { message: "No AI sessions".to_string() });
+                }
+            }
+            ClientMsg::PrevAiWindow => {
+                if st.session.cycle_ai_window(false) {
+                    let tab = st.session.tab_state();
+                    let _ = client_tx.send(tab);
+                    if let Some(wid) = st.session.active_window {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        }
+                    }
+                } else {
+                    let _ = client_tx.send(ServerMsg::Info { message: "No AI sessions".to_string() });
+                }
+            }
+            ClientMsg::MoveWindowToNewProject => {
+                if let Some(wid) = st.session.active_window {
+                    let cwd = st.session.window_cwd(wid)
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+                    let proj_name = cwd.file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "project".to_string());
+                    let project_id = st.session.add_project(proj_name, cwd);
+                    let group_id = st.session.add_group(project_id, "default".to_string(), None);
+                    st.session.move_window_to_group(wid, group_id);
+                    st.session.select_project(project_id);
+                    st.session.active_group = Some(group_id);
+                    st.session.active_window = Some(wid);
+                    let tab = st.session.tab_state();
+                    let _ = client_tx.send(tab);
+                }
+            }
+            ClientMsg::MoveWindowToNewGroup => {
+                if let (Some(wid), Some(project_id)) = (st.session.active_window, st.session.active_project) {
+                    let cwd = st.session.window_cwd(wid)
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+                    let grp_name = cwd.file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "group".to_string());
+                    let group_id = st.session.add_group(project_id, grp_name, Some(cwd));
+                    st.session.move_window_to_group(wid, group_id);
+                    st.session.select_group(group_id);
+                    st.session.active_window = Some(wid);
+                    let tab = st.session.tab_state();
+                    let _ = client_tx.send(tab);
+                }
+            }
+            ClientMsg::CloseWindow => {
+                if let Some(wid) = st.session.active_window {
+                    st.session.remove_window(wid);
+                    let tab = st.session.tab_state();
+                    let _ = client_tx.send(tab);
+                    if let Some(new_wid) = st.session.active_window {
+                        if let Some(data) = st.session.screen_dump(new_wid) {
+                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: new_wid, data });
+                        }
+                    }
+                }
+            }
             ClientMsg::Detach => break,
+            ClientMsg::Shutdown => {
+                std::process::exit(0);
+            }
         }
     }
 

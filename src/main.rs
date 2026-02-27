@@ -1,3 +1,4 @@
+mod ai_detect;
 mod app;
 mod client;
 mod config;
@@ -27,6 +28,21 @@ async fn main() -> Result<()> {
         Some("server") => {
             let preset = args.get(2).map(|s| s.as_str());
             server::run_server(preset).await
+        }
+        Some("kill") => {
+            let sock_path = protocol::socket_path();
+            match tokio::net::UnixStream::connect(&sock_path).await {
+                Ok(stream) => {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let _ = reader;
+                    protocol::write_msg(&mut writer, &protocol::ClientMsg::Shutdown).await?;
+                    println!("zmux server stopped");
+                }
+                Err(_) => {
+                    println!("No zmux server running");
+                }
+            }
+            Ok(())
         }
         Some("list") => {
             let presets = config::list_presets()?;
@@ -146,6 +162,7 @@ async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<(
     match app.mode {
         Mode::Normal => handle_normal_key(app, key).await,
         Mode::Nav => handle_nav_key(app, key).await,
+        Mode::AiNav => handle_ai_nav_key(app, key).await,
     }
 }
 
@@ -193,17 +210,27 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.select_tab_by_index(idx).await?;
         }
 
+        KeyCode::Char('x') => {
+            app.conn.close_window().await?;
+            app.mode = Mode::Normal;
+        }
         KeyCode::Char('c') => {
             app.conn.new_window(None).await?;
             app.mode = Mode::Normal;
         }
         KeyCode::Char('g') => {
-            app.conn.new_group(None).await?;
+            app.conn.move_window_to_new_group().await?;
             app.mode = Mode::Normal;
         }
         KeyCode::Char('p') => {
-            app.conn.new_project(None).await?;
+            app.conn.move_window_to_new_project().await?;
             app.mode = Mode::Normal;
+        }
+
+        // Enter AI navigation mode
+        KeyCode::Char('a') => {
+            app.conn.next_ai_window().await?;
+            app.mode = Mode::AiNav;
         }
 
         // Save current cwd as group dir (s) or project dir (S)
@@ -222,6 +249,24 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Normal;
         }
 
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_ai_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => app.mode = Mode::Normal,
+        KeyCode::Char('l') | KeyCode::Right => {
+            app.conn.next_ai_window().await?;
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            app.conn.prev_ai_window().await?;
+        }
+        // Press 'a' again to go to next
+        KeyCode::Char('a') => {
+            app.conn.next_ai_window().await?;
+        }
         _ => {}
     }
     Ok(())
