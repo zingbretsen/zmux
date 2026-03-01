@@ -67,6 +67,8 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `b` | Jump to previous word |
 | `Ctrl+U` | Scroll up half page |
 | `Ctrl+D` | Scroll down half page |
+| `PageUp` | Scroll up full page |
+| `PageDown` | Scroll down full page |
 | `g` | Jump to top of scrollback |
 | `G` | Jump to bottom (live view) |
 | `Space` | Start/cancel selection |

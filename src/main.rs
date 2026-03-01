@@ -619,6 +619,7 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
     let screen_rows = app.term_rows;
     let screen_cols = app.term_cols;
     let half_page = (screen_rows / 2) as usize;
+    let full_page = screen_rows as usize;
 
     let set_scrollback = |app: &mut App, offset: usize| -> usize {
         if let Some(wid) = app.active_window {
@@ -815,6 +816,14 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
         }
         KeyCode::Char('d') if ctrl => {
             app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(half_page);
+            set_scrollback(app, app.copy_scroll_offset);
+        }
+        KeyCode::PageUp => {
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(full_page);
+            app.copy_scroll_offset = set_scrollback(app, app.copy_scroll_offset);
+        }
+        KeyCode::PageDown => {
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(full_page);
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('g') if !app.copy_selecting => {
