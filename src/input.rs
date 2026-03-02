@@ -255,6 +255,14 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             }
         }
 
+        // Cycle pane content forward/backward in tiled mode
+        KeyCode::Char('n') => {
+            app.conn.cycle_pane_content(true).await?;
+        }
+        KeyCode::Char('N') => {
+            app.conn.cycle_pane_content(false).await?;
+        }
+
         _ => {}
     }
     Ok(())

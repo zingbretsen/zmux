@@ -710,6 +710,24 @@ async fn handle_client(
                     }
                 }
             }
+            ClientMsg::CyclePaneContent { forward } => {
+                if st.session.cycle_pane_content(forward) {
+                    let (cols, rows) = st.effective_size();
+                    let term_rows = rows.saturating_sub(1);
+                    let _ = st.session.resize_all(term_rows, cols);
+                    let tab = st.session.tab_state();
+                    st.broadcast(tab);
+                    for wid in st.session.active_tiled_windows() {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
+                        }
+                    }
+                } else {
+                    let _ = client_tx.send(ServerMsg::Info {
+                        message: "No other windows to swap".to_string(),
+                    });
+                }
+            }
             ClientMsg::FocusPane { direction } => {
                 st.session.focus_pane(direction);
                 let tab = st.session.tab_state();

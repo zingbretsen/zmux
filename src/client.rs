@@ -171,6 +171,10 @@ impl ClientConnection {
         self.send(ClientMsg::ResizePane { direction }).await
     }
 
+    pub async fn cycle_pane_content(&self, forward: bool) -> Result<()> {
+        self.send(ClientMsg::CyclePaneContent { forward }).await
+    }
+
     pub async fn send_input_to_window(&self, window_id: NodeId, data: Vec<u8>) -> Result<()> {
         self.send(ClientMsg::InputToWindow { window_id, data }).await
     }

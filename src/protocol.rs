@@ -215,6 +215,8 @@ pub enum ClientMsg {
     InputToWindow { window_id: NodeId, data: Vec<u8> },
     /// Resize the active pane in tiled mode
     ResizePane { direction: PaneDirection },
+    /// Cycle the focused pane's content to the next/prev untiled window
+    CyclePaneContent { forward: bool },
     /// Shut down the server
     Shutdown,
 }

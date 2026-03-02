@@ -521,6 +521,72 @@ impl SessionTree {
         }
     }
 
+    /// Replace the active window in the tiled set with the next/prev untiled window.
+    /// Cycles relative to the current window's position in the group's children list.
+    pub(crate) fn cycle_pane_content(&mut self, forward: bool) -> bool {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return false,
+        };
+        let active = match self.active_window {
+            Some(wid) => wid,
+            None => return false,
+        };
+
+        let (tiled, children) = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled => {
+                (g.tiled_windows.clone(), g.children.clone())
+            }
+            _ => return false,
+        };
+
+        // Active window must be in the tiled set
+        let tile_idx = match tiled.iter().position(|&id| id == active) {
+            Some(i) => i,
+            None => return false,
+        };
+
+        // Find the current window's position in the group's children list
+        let child_idx = match children.iter().position(|&id| id == active) {
+            Some(i) => i,
+            None => return false,
+        };
+
+        // Find next/prev untiled window relative to the current window in children order
+        let n = children.len();
+        let mut replacement = None;
+        for step in 1..n {
+            let idx = if forward {
+                (child_idx + step) % n
+            } else {
+                (child_idx + n - step) % n
+            };
+            let candidate = children[idx];
+            if !tiled.contains(&candidate) {
+                replacement = Some(candidate);
+                break;
+            }
+        }
+
+        let replacement = match replacement {
+            Some(id) => id,
+            None => return false, // all windows are tiled, nothing to swap
+        };
+
+        // Swap: replace active window at its tile position with the replacement
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            g.tiled_windows[tile_idx] = replacement;
+
+            // Transfer pane weight from old window to new
+            if let Some(weight) = g.pane_weights.remove(&active) {
+                g.pane_weights.insert(replacement, weight);
+            }
+        }
+
+        self.active_window = Some(replacement);
+        true
+    }
+
     pub(crate) fn focus_pane(&mut self, direction: PaneDirection) {
         let gid = match self.active_group {
             Some(gid) => gid,

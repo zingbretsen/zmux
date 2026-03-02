@@ -113,7 +113,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
  w       New worktree group X       Close group
  R       Rebase onto main   M       Merge into main
  t       Toggle tiled       T       Cycle tile layout
- m       Toggle window tile
+ m       Toggle window tile n/N     Cycle pane content
  d       Detach
 
  AI Nav: h/l to cycle, Esc to exit
