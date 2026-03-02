@@ -3,6 +3,7 @@ use crate::protocol::{self, ClientMsg, LayoutMode, NodeId, ServerMsg};
 use crate::session::{Node, SessionTree};
 use crate::worktree;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
@@ -11,9 +12,27 @@ use tracing::{info, warn, error};
 
 struct ServerState {
     session: SessionTree,
-    client_tx: Option<mpsc::UnboundedSender<ServerMsg>>,
-    term_size: (u16, u16),
+    clients: HashMap<u64, mpsc::UnboundedSender<ServerMsg>>,
+    next_client_id: u64,
+    client_sizes: HashMap<u64, (u16, u16)>,
     preset_name: Option<String>,
+}
+
+impl ServerState {
+    fn broadcast(&self, msg: ServerMsg) {
+        for tx in self.clients.values() {
+            let _ = tx.send(msg.clone());
+        }
+    }
+
+    fn effective_size(&self) -> (u16, u16) {
+        if self.client_sizes.is_empty() {
+            return (80, 24);
+        }
+        let cols = self.client_sizes.values().map(|s| s.0).min().unwrap_or(80);
+        let rows = self.client_sizes.values().map(|s| s.1).min().unwrap_or(24);
+        (cols, rows)
+    }
 }
 
 pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
@@ -84,8 +103,9 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
 
     let state = Arc::new(Mutex::new(ServerState {
         session,
-        client_tx: None,
-        term_size: (default_cols, default_rows),
+        clients: HashMap::new(),
+        next_client_id: 0,
+        client_sizes: HashMap::new(),
         preset_name: preset_name.map(|s| s.to_string()),
     }));
 
@@ -97,23 +117,19 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                 // Sentinel: PTY exited, remove the window
                 let mut st = state_clone.lock().await;
                 st.session.remove_window(window_id);
-                if let Some(ref tx) = st.client_tx {
-                    let tab = st.session.tab_state();
-                    let _ = tx.send(tab);
-                    // Send screen dump for the new active window
-                    if let Some(wid) = st.session.active_window {
-                        if let Some(data) = st.session.screen_dump(wid) {
-                            let _ = tx.send(ServerMsg::ScreenDump { window_id: wid, data });
-                        }
+                let tab = st.session.tab_state();
+                st.broadcast(tab);
+                // Send screen dump for the new active window
+                if let Some(wid) = st.session.active_window {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
                 continue;
             }
             let st = state_clone.lock().await;
-            if let Some(ref tx) = st.client_tx {
-                if st.session.active_window == Some(window_id) || st.session.is_tiled_window(window_id) {
-                    let _ = tx.send(ServerMsg::PtyOutput { window_id, data });
-                }
+            if st.session.active_window == Some(window_id) || st.session.is_tiled_window(window_id) {
+                st.broadcast(ServerMsg::PtyOutput { window_id, data });
             }
         }
     });
@@ -127,10 +143,8 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
             let mut st = state_ai.lock().await;
             let changed = st.session.poll_ai_status();
             if changed {
-                if let Some(ref tx) = st.client_tx {
-                    let tab = st.session.tab_state();
-                    let _ = tx.send(tab);
-                }
+                let tab = st.session.tab_state();
+                st.broadcast(tab);
             }
         }
     });
@@ -159,9 +173,11 @@ async fn handle_client(
     let (client_tx, mut client_rx) = mpsc::unbounded_channel::<ServerMsg>();
 
     // Register as active client and send initial state
-    {
+    let client_id = {
         let mut st = state.lock().await;
-        st.client_tx = Some(client_tx.clone());
+        let client_id = st.next_client_id;
+        st.next_client_id += 1;
+        st.clients.insert(client_id, client_tx.clone());
 
         let tab_state = st.session.tab_state();
         let _ = client_tx.send(tab_state);
@@ -172,7 +188,8 @@ async fn handle_client(
                 let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
             }
         }
-    }
+        client_id
+    };
 
     // Writer task
     let writer_clone = Arc::clone(&writer);
@@ -203,46 +220,47 @@ async fn handle_client(
                 }
             }
             ClientMsg::Resize { cols, rows } => {
-                st.term_size = (cols, rows);
-                let term_rows = rows.saturating_sub(1);
-                let _ = st.session.resize_all(term_rows, cols);
+                st.client_sizes.insert(client_id, (cols, rows));
+                let (eff_cols, eff_rows) = st.effective_size();
+                let term_rows = eff_rows.saturating_sub(1);
+                let _ = st.session.resize_all(term_rows, eff_cols);
                 if let Some(wid) = st.session.active_window {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
             }
             ClientMsg::SelectProject { id } => {
                 st.session.select_project(id);
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
                 if let Some(wid) = st.session.active_window {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
             }
             ClientMsg::SelectGroup { id } => {
                 st.session.select_group(id);
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
                 if let Some(wid) = st.session.active_window {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
             }
             ClientMsg::SelectWindow { id } => {
                 st.session.select_window(id);
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
                 if let Some(data) = st.session.screen_dump(id) {
-                    let _ = client_tx.send(ServerMsg::ScreenDump { window_id: id, data });
+                    st.broadcast(ServerMsg::ScreenDump { window_id: id, data });
                 }
             }
             ClientMsg::NewWindow { name } => {
                 if let Some(group_id) = st.session.active_group {
-                    let (cols, rows) = st.term_size;
+                    let (cols, rows) = st.effective_size();
                     let term_rows = rows.saturating_sub(1);
                     let win_name = name.unwrap_or_else(|| {
                         let count = if let Some(Node::Group(g)) = st.session.nodes.get(&group_id) {
@@ -253,7 +271,7 @@ async fn handle_client(
                     if let Ok(id) = st.session.add_window(group_id, win_name.clone(), term_rows, cols, pty_tx.clone()) {
                         st.session.select_window(id);
                         let tab = st.session.tab_state();
-                        let _ = client_tx.send(tab);
+                        st.broadcast(tab);
                     }
                 }
             }
@@ -267,13 +285,13 @@ async fn handle_client(
                         }
                     });
                     let group_id = st.session.add_group(project_id, grp_name, None, None);
-                    let (cols, rows) = st.term_size;
+                    let (cols, rows) = st.effective_size();
                     let term_rows = rows.saturating_sub(1);
                     if let Ok(wid) = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone()) {
                         st.session.select_group(group_id);
                         st.session.select_window(wid);
                         let tab = st.session.tab_state();
-                        let _ = client_tx.send(tab);
+                        st.broadcast(tab);
                     }
                 }
             }
@@ -286,13 +304,13 @@ async fn handle_client(
                 });
                 let project_id = st.session.add_project(proj_name, cwd);
                 let group_id = st.session.add_group(project_id, "default".to_string(), None, None);
-                let (cols, rows) = st.term_size;
+                let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(1);
                 if let Ok(wid) = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone()) {
                     st.session.select_project(project_id);
                     st.session.select_window(wid);
                     let tab = st.session.tab_state();
-                    let _ = client_tx.send(tab);
+                    st.broadcast(tab);
                 }
             }
             ClientMsg::Subscribe => {
@@ -307,7 +325,7 @@ async fn handle_client(
             ClientMsg::LoadPreset { name } => {
                 match config::load_preset(&name) {
                     Ok(preset) => {
-                        let (cols, rows) = st.term_size;
+                        let (cols, rows) = st.effective_size();
                         let term_rows = rows.saturating_sub(1);
                         for proj_preset in &preset.projects {
                             let project_id = st.session.add_project(
@@ -330,7 +348,7 @@ async fn handle_client(
                             }
                         }
                         let tab = st.session.tab_state();
-                        let _ = client_tx.send(tab);
+                        st.broadcast(tab);
                     }
                     Err(e) => {
                         let _ = client_tx.send(ServerMsg::Error { message: format!("Failed to load preset: {}", e) });
@@ -376,10 +394,10 @@ async fn handle_client(
             ClientMsg::NextAiWindow => {
                 if st.session.cycle_ai_window(true) {
                     let tab = st.session.tab_state();
-                    let _ = client_tx.send(tab);
+                    st.broadcast(tab);
                     if let Some(wid) = st.session.active_window {
                         if let Some(data) = st.session.screen_dump(wid) {
-                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                            st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                         }
                     }
                 } else {
@@ -389,10 +407,10 @@ async fn handle_client(
             ClientMsg::PrevAiWindow => {
                 if st.session.cycle_ai_window(false) {
                     let tab = st.session.tab_state();
-                    let _ = client_tx.send(tab);
+                    st.broadcast(tab);
                     if let Some(wid) = st.session.active_window {
                         if let Some(data) = st.session.screen_dump(wid) {
-                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                            st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                         }
                     }
                 } else {
@@ -413,7 +431,7 @@ async fn handle_client(
                     st.session.active_group = Some(group_id);
                     st.session.active_window = Some(wid);
                     let tab = st.session.tab_state();
-                    let _ = client_tx.send(tab);
+                    st.broadcast(tab);
                 }
             }
             ClientMsg::MoveWindowToNewGroup => {
@@ -428,7 +446,7 @@ async fn handle_client(
                     st.session.select_group(group_id);
                     st.session.active_window = Some(wid);
                     let tab = st.session.tab_state();
-                    let _ = client_tx.send(tab);
+                    st.broadcast(tab);
                 }
             }
             ClientMsg::Rename { id, name } => {
@@ -439,16 +457,16 @@ async fn handle_client(
                     None => {}
                 }
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
             }
             ClientMsg::CloseWindow => {
                 if let Some(wid) = st.session.active_window {
                     st.session.remove_window(wid);
                     let tab = st.session.tab_state();
-                    let _ = client_tx.send(tab);
+                    st.broadcast(tab);
                     if let Some(new_wid) = st.session.active_window {
                         if let Some(data) = st.session.screen_dump(new_wid) {
-                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: new_wid, data });
+                            st.broadcast(ServerMsg::ScreenDump { window_id: new_wid, data });
                         }
                     }
                 }
@@ -549,13 +567,13 @@ async fn handle_client(
                             let group_id = st.session.add_group(
                                 project_id, branch.clone(), Some(wt_path.clone()), Some(wt_path),
                             );
-                            let (cols, rows) = st.term_size;
+                            let (cols, rows) = st.effective_size();
                             let term_rows = rows.saturating_sub(1);
                             if let Ok(wid) = st.session.add_window(group_id, "shell".to_string(), term_rows, cols, pty_tx.clone()) {
                                 st.session.select_group(group_id);
                                 st.session.select_window(wid);
                                 let tab = st.session.tab_state();
-                                let _ = client_tx.send(tab);
+                                st.broadcast(tab);
                                 let _ = client_tx.send(ServerMsg::Info {
                                     message: format!("Worktree: {}", branch),
                                 });
@@ -618,10 +636,10 @@ async fn handle_client(
                         }
                     }
                     let tab = st.session.tab_state();
-                    let _ = client_tx.send(tab);
+                    st.broadcast(tab);
                     if let Some(wid) = st.session.active_window {
                         if let Some(data) = st.session.screen_dump(wid) {
-                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                            st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                         }
                     }
                 }
@@ -633,9 +651,9 @@ async fn handle_client(
                         st.session.active_group = Some(gid);
                         st.session.active_window = Some(wid);
                         let tab = st.session.tab_state();
-                        let _ = client_tx.send(tab);
+                        st.broadcast(tab);
                         if let Some(data) = st.session.screen_dump(wid) {
-                            let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                            st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                         }
                         let _ = client_tx.send(ServerMsg::Info {
                             message: format!("Found in: {}", name),
@@ -650,67 +668,67 @@ async fn handle_client(
             }
             ClientMsg::ToggleLayout => {
                 st.session.toggle_layout();
-                let (cols, rows) = st.term_size;
+                let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(1);
                 let _ = st.session.resize_all(term_rows, cols);
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
                 for wid in st.session.active_tiled_windows() {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
                 if let Some(wid) = st.session.active_window {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
             }
             ClientMsg::CycleLayout => {
                 st.session.cycle_layout();
-                let (cols, rows) = st.term_size;
+                let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(1);
                 let _ = st.session.resize_all(term_rows, cols);
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
                 for wid in st.session.active_tiled_windows() {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
             }
             ClientMsg::ToggleTile { id } => {
                 st.session.toggle_tile(id);
-                let (cols, rows) = st.term_size;
+                let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(1);
                 let _ = st.session.resize_all(term_rows, cols);
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
                 for wid in st.session.active_tiled_windows() {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
             }
             ClientMsg::FocusPane { direction } => {
                 st.session.focus_pane(direction);
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
             }
             ClientMsg::ResizePane { direction } => {
                 st.session.resize_pane(direction);
-                let (cols, rows) = st.term_size;
+                let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(1);
                 let _ = st.session.resize_all(term_rows, cols);
                 let tab = st.session.tab_state();
-                let _ = client_tx.send(tab);
+                st.broadcast(tab);
                 if let Some(gid) = st.session.active_group {
                     if let Some(Node::Group(g)) = st.session.nodes.get(&gid) {
                         if g.layout_mode == LayoutMode::Tiled {
                             let tw = g.tiled_windows.clone();
                             for wid in tw {
                                 if let Some(data) = st.session.screen_dump(wid) {
-                                    let _ = client_tx.send(ServerMsg::ScreenDump { window_id: wid, data });
+                                    st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                                 }
                             }
                         }
@@ -733,9 +751,16 @@ async fn handle_client(
 
     {
         let mut st = state.lock().await;
-        st.client_tx = None;
+        st.clients.remove(&client_id);
+        st.client_sizes.remove(&client_id);
+        // Recalculate effective size for remaining clients
+        if !st.clients.is_empty() {
+            let (cols, rows) = st.effective_size();
+            let term_rows = rows.saturating_sub(1);
+            let _ = st.session.resize_all(term_rows, cols);
+        }
     }
     writer_task.abort();
-    info!("Client detached");
+    info!("Client {} detached", client_id);
     Ok(())
 }

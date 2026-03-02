@@ -220,7 +220,7 @@ pub enum ClientMsg {
 }
 
 // Server → Client
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMsg {
     /// Raw PTY output bytes for a window (client feeds to its own vt100 parser)
     PtyOutput { window_id: NodeId, data: Vec<u8> },
