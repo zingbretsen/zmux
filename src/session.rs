@@ -887,20 +887,11 @@ mod tests {
 /// Convert a vt100 screen to ANSI escape sequences that reproduce it.
 fn screen_to_ansi(screen: &vt100::Screen) -> Vec<u8> {
     let mut out = Vec::with_capacity(8192);
+    // Clear screen and reset attributes before writing formatted contents
     out.extend_from_slice(b"\x1b[H\x1b[2J\x1b[0m");
-    let (rows, cols) = (screen.size().0, screen.size().1);
-    for row in 0..rows {
-        out.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
-        for col in 0..cols {
-            let cell = screen.cell(row, col).unwrap();
-            let c = cell.contents();
-            if c.is_empty() {
-                out.push(b' ');
-            } else {
-                out.extend_from_slice(c.as_bytes());
-            }
-        }
-    }
+    // Use the vt100 library's built-in method which preserves colors and attributes
+    out.extend_from_slice(&screen.contents_formatted());
+    // Restore cursor position
     let cursor = screen.cursor_position();
     out.extend_from_slice(format!("\x1b[{};{}H", cursor.0 + 1, cursor.1 + 1).as_bytes());
     out
