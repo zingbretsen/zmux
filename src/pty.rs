@@ -224,9 +224,32 @@ impl PtyHandle {
         Ok(())
     }
 
-    /// Get the current working directory of the shell process (Linux only).
+    /// Get the current working directory of the shell process.
     pub fn cwd(&self) -> Option<PathBuf> {
         let pid = self.child_pid?;
-        std::fs::read_link(format!("/proc/{}/cwd", pid)).ok()
+        // Linux: /proc/{pid}/cwd symlink
+        #[cfg(target_os = "linux")]
+        {
+            return std::fs::read_link(format!("/proc/{}/cwd", pid)).ok();
+        }
+        // macOS: use lsof -a -p {pid} -d cwd -Fn
+        #[cfg(target_os = "macos")]
+        {
+            let output = std::process::Command::new("lsof")
+                .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+                .output()
+                .ok()?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                if let Some(path) = line.strip_prefix('n') {
+                    return Some(PathBuf::from(path));
+                }
+            }
+            None
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            None
+        }
     }
 }
