@@ -133,3 +133,81 @@ pub fn parse_dotenv(dir: &Path) -> HashMap<String, String> {
     }
     env
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn parse_dotenv_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "FOO=bar\nBAZ=qux\n").unwrap();
+        let env = parse_dotenv(dir.path());
+        assert_eq!(env.get("FOO").unwrap(), "bar");
+        assert_eq!(env.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
+    fn parse_dotenv_strips_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "A=\"hello\"\nB='world'\n").unwrap();
+        let env = parse_dotenv(dir.path());
+        assert_eq!(env.get("A").unwrap(), "hello");
+        assert_eq!(env.get("B").unwrap(), "world");
+    }
+
+    #[test]
+    fn parse_dotenv_skips_comments_and_blanks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "# comment\n\nKEY=val\n").unwrap();
+        let env = parse_dotenv(dir.path());
+        assert_eq!(env.len(), 1);
+        assert_eq!(env.get("KEY").unwrap(), "val");
+    }
+
+    #[test]
+    fn parse_dotenv_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = parse_dotenv(dir.path());
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn parse_dotenv_trims_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "  KEY  =  value  \n").unwrap();
+        let env = parse_dotenv(dir.path());
+        assert_eq!(env.get("KEY").unwrap(), "value");
+    }
+
+    #[test]
+    fn preset_roundtrip() {
+        let preset = Preset {
+            projects: vec![ProjectPreset {
+                name: "myproj".into(),
+                path: "/tmp".into(),
+                groups: vec![GroupPreset {
+                    name: "main".into(),
+                    path: None,
+                    worktree_branch: Some("feature".into()),
+                    windows: vec![WindowPreset {
+                        name: "editor".into(),
+                        command: Some("vim".into()),
+                    }],
+                }],
+            }],
+        };
+        let toml_str = toml::to_string_pretty(&preset).unwrap();
+        let decoded: Preset = toml::from_str(&toml_str).unwrap();
+        assert_eq!(decoded.projects.len(), 1);
+        assert_eq!(decoded.projects[0].groups[0].worktree_branch.as_deref(), Some("feature"));
+        assert_eq!(decoded.projects[0].groups[0].windows[0].command.as_deref(), Some("vim"));
+    }
+
+    #[test]
+    fn config_default() {
+        let config = Config::default();
+        assert!(config.shell.is_none());
+    }
+}

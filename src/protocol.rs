@@ -36,6 +36,110 @@ impl TileLayout {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tile_layout_cycles_through_all_variants() {
+        let start = TileLayout::EqualColumns;
+        let second = start.next();
+        let third = second.next();
+        let fourth = third.next();
+        let back = fourth.next();
+
+        assert_eq!(second, TileLayout::EqualRows);
+        assert_eq!(third, TileLayout::MainLeft);
+        assert_eq!(fourth, TileLayout::Grid);
+        assert_eq!(back, TileLayout::EqualColumns);
+    }
+
+    #[test]
+    fn tile_layout_names() {
+        assert_eq!(TileLayout::EqualColumns.name(), "columns");
+        assert_eq!(TileLayout::EqualRows.name(), "rows");
+        assert_eq!(TileLayout::MainLeft.name(), "main-left");
+        assert_eq!(TileLayout::Grid.name(), "grid");
+    }
+
+    #[test]
+    fn client_msg_roundtrip() {
+        let msg = ClientMsg::Input { data: vec![1, 2, 3] };
+        let json = serde_json::to_vec(&msg).unwrap();
+        let decoded: ClientMsg = serde_json::from_slice(&json).unwrap();
+        match decoded {
+            ClientMsg::Input { data } => assert_eq!(data, vec![1, 2, 3]),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_msg_tab_state_roundtrip() {
+        let msg = ServerMsg::TabState {
+            projects: vec![TabEntry { id: 1, name: "proj".into(), ai_status: None }],
+            groups: vec![],
+            windows: vec![],
+            active_project: Some(1),
+            active_group: None,
+            active_window: None,
+            layout_mode: LayoutMode::Tiled,
+            tile_layout: TileLayout::Grid,
+            tiled_windows: vec![2, 3],
+            pane_weights: vec![(2, 1.0, 0.5)],
+        };
+        let json = serde_json::to_vec(&msg).unwrap();
+        let decoded: ServerMsg = serde_json::from_slice(&json).unwrap();
+        match decoded {
+            ServerMsg::TabState { projects, active_project, layout_mode, tile_layout, tiled_windows, pane_weights, .. } => {
+                assert_eq!(projects.len(), 1);
+                assert_eq!(projects[0].name, "proj");
+                assert_eq!(active_project, Some(1));
+                assert_eq!(layout_mode, LayoutMode::Tiled);
+                assert_eq!(tile_layout, TileLayout::Grid);
+                assert_eq!(tiled_windows, vec![2, 3]);
+                assert_eq!(pane_weights, vec![(2, 1.0, 0.5)]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn write_read_msg_roundtrip() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let msg = ClientMsg::Resize { cols: 80, rows: 24 };
+            let mut buf = Vec::new();
+            write_msg(&mut buf, &msg).await.unwrap();
+
+            let mut cursor = std::io::Cursor::new(buf);
+            let decoded: Option<ClientMsg> = read_msg(&mut cursor).await.unwrap();
+            match decoded.unwrap() {
+                ClientMsg::Resize { cols, rows } => {
+                    assert_eq!(cols, 80);
+                    assert_eq!(rows, 24);
+                }
+                _ => panic!("wrong variant"),
+            }
+        });
+    }
+
+    #[test]
+    fn read_msg_rejects_oversized() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            // Craft a message claiming to be 20MB
+            let len = (20 * 1024 * 1024u32).to_be_bytes();
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&len);
+            buf.extend_from_slice(&[0u8; 64]);
+
+            let mut cursor = std::io::Cursor::new(buf);
+            let result: anyhow::Result<Option<ClientMsg>> = read_msg(&mut cursor).await;
+            assert!(result.is_err());
+        });
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum PaneDirection {
     Left,
