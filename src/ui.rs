@@ -1,4 +1,4 @@
-use crate::app::{App, Mode, TabLevel};
+use crate::app::{App, Mode, TabLevel, TreeItem};
 use crate::protocol::{LayoutMode, NodeId, TileLayout};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -48,6 +48,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if matches!(app.mode, Mode::PresetInput) {
         draw_preset_picker(f, app, area);
+    }
+    if matches!(app.mode, Mode::TreeNav) {
+        draw_tree_nav(f, app, area);
     }
 }
 
@@ -114,8 +117,11 @@ fn draw_help(f: &mut Frame, area: Rect) {
  R       Rebase onto main   M       Merge into main
  t       Toggle tiled       T       Cycle tile layout
  m       Toggle window tile n/N     Cycle pane content
- d       Detach
+ f       Session tree       d       Detach
 
+ Tree Nav: j/k move, h fold, l expand, Enter select
+ Tree Nav: H/L collapse/expand one level, J/K same-level
+ Tree Nav: r rename, x close, g/G top/bottom
  AI Nav: h/l to cycle, Esc to exit
  Tiled: Ctrl+h/j/k/l to move focus
  Tiled: Shift+arrows to resize pane
@@ -252,6 +258,114 @@ fn draw_preset_picker(f: &mut Frame, app: &App, area: Rect) {
 
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
+}
+
+fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
+    let items = app.tree_visible_items();
+    if items.is_empty() {
+        return;
+    }
+
+    // Full-screen overlay
+    f.render_widget(Clear, area);
+
+    // Split: tree list on left, preview on right
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    let tree_area = halves[0];
+    let preview_area = halves[1];
+
+    // Tree list
+    let tree_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Session Tree ");
+    let tree_inner = tree_block.inner(tree_area);
+    f.render_widget(tree_block, tree_area);
+
+    let visible_height = tree_inner.height as usize;
+    // Scroll to keep cursor visible
+    let scroll_offset = if app.tree_cursor >= visible_height {
+        app.tree_cursor - visible_height + 1
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = items
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .map(|(i, item)| {
+            let is_cursor = i == app.tree_cursor;
+            match item {
+                TreeItem::Project { id, name, expanded } => {
+                    let arrow = if *expanded { "▾" } else { "▸" };
+                    let is_active = app.tree_active_project == Some(*id);
+                    let mut style = Style::default().fg(Color::Cyan);
+                    if is_active {
+                        style = style.bold();
+                    }
+                    if is_cursor {
+                        style = style.fg(Color::Black).bg(Color::Cyan);
+                    }
+                    Line::from(Span::styled(format!("{} {}", arrow, name), style))
+                }
+                TreeItem::Group { id, name, expanded } => {
+                    let arrow = if *expanded { "▾" } else { "▸" };
+                    let is_active = app.tree_active_group == Some(*id);
+                    let mut style = Style::default().fg(Color::Green);
+                    if is_active {
+                        style = style.bold();
+                    }
+                    if is_cursor {
+                        style = style.fg(Color::Black).bg(Color::Green);
+                    }
+                    Line::from(Span::styled(format!("  {} {}", arrow, name), style))
+                }
+                TreeItem::Window { id, name, ai_status } => {
+                    let is_active = app.tree_active_window == Some(*id);
+                    let mut style = Style::default().fg(Color::White);
+                    if is_active {
+                        style = style.fg(Color::Yellow).bold();
+                    }
+                    if is_cursor {
+                        style = style.fg(Color::Black).bg(Color::Yellow);
+                    }
+                    let ai_indicator = match ai_status {
+                        Some(crate::ai_detect::AiStatus::Running { .. }) => " ●",
+                        Some(crate::ai_detect::AiStatus::Idle { .. }) => " ◐",
+                        Some(crate::ai_detect::AiStatus::Finished { .. }) => " ○",
+                        None => "",
+                    };
+                    Line::from(Span::styled(format!("    {}{}", name, ai_indicator), style))
+                }
+            }
+        })
+        .collect();
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, tree_inner);
+
+    // Preview pane
+    let preview_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Preview ");
+    let preview_inner = preview_block.inner(preview_area);
+    f.render_widget(preview_block, preview_area);
+
+    // Show preview if cursor is on a window
+    if let Some(wid) = app.tree_cursor_window_id() {
+        if let Some(parser) = app.tree_parsers.get(&wid) {
+            let parser = parser.lock().unwrap();
+            let pseudo_term = PseudoTerminal::new(parser.screen());
+            f.render_widget(pseudo_term, preview_inner);
+        }
+    }
 }
 
 fn draw_tiled(f: &mut Frame, app: &App, area: Rect) {
@@ -529,6 +643,9 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     }
     if matches!(app.mode, Mode::AiNav) {
         spans.push(Span::styled(" [AI]", Style::default().fg(Color::Green).bold()));
+    }
+    if matches!(app.mode, Mode::TreeNav) {
+        spans.push(Span::styled(" [TREE]", Style::default().fg(Color::Cyan).bold()));
     }
     if matches!(app.mode, Mode::Copy) {
         spans.push(Span::styled(

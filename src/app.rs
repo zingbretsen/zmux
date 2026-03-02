@@ -1,7 +1,7 @@
 use crate::client::ClientConnection;
-use crate::protocol::{LayoutMode, NodeId, ServerMsg, TabEntry, TileLayout};
+use crate::protocol::{LayoutMode, NodeId, ServerMsg, TabEntry, TileLayout, TreeProject};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -16,6 +16,7 @@ pub enum Mode {
     BranchInput,
     PresetInput,
     Help,
+    TreeNav,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -25,10 +26,18 @@ pub enum TabLevel {
     Window,
 }
 
+/// Flattened item in the tree nav view
+pub enum TreeItem {
+    Project { id: NodeId, name: String, expanded: bool },
+    Group { id: NodeId, name: String, expanded: bool },
+    Window { id: NodeId, name: String, ai_status: Option<crate::ai_detect::AiStatus> },
+}
+
 pub struct App {
     pub conn: ClientConnection,
     pub should_quit: bool,
     pub should_detach: bool,
+    pub should_reconnect: bool,
     pub last_size: (u16, u16),
     pub mode: Mode,
     pub tab_focus: TabLevel,
@@ -75,6 +84,17 @@ pub struct App {
     // Preset picker state
     pub preset_candidates: Vec<String>,
     pub preset_selected: Option<usize>,
+
+    // Tree nav state
+    pub tree_data: Vec<TreeProject>,
+    pub tree_cursor: usize,
+    pub tree_collapsed_projects: HashSet<NodeId>,
+    pub tree_collapsed_groups: HashSet<NodeId>,
+    pub tree_active_project: Option<NodeId>,
+    pub tree_active_group: Option<NodeId>,
+    pub tree_active_window: Option<NodeId>,
+    /// Parsers for tree nav preview (separate from main parsers)
+    pub tree_parsers: HashMap<NodeId, Arc<Mutex<vt100::Parser>>>,
 }
 
 impl App {
@@ -85,6 +105,7 @@ impl App {
             conn,
             should_quit: false,
             should_detach: false,
+            should_reconnect: false,
             last_size: (cols, rows),
             mode: Mode::Normal,
             tab_focus: TabLevel::Window,
@@ -114,6 +135,14 @@ impl App {
             branch_selected: None,
             preset_candidates: Vec::new(),
             preset_selected: None,
+            tree_data: Vec::new(),
+            tree_cursor: 0,
+            tree_collapsed_projects: HashSet::new(),
+            tree_collapsed_groups: HashSet::new(),
+            tree_active_project: None,
+            tree_active_group: None,
+            tree_active_window: None,
+            tree_parsers: HashMap::new(),
         })
     }
 
@@ -171,6 +200,33 @@ impl App {
             ServerMsg::WindowCreated { .. } => {}
             ServerMsg::Error { message } => {
                 self.status_message = Some((format!("Error: {}", message), Instant::now()));
+            }
+            ServerMsg::Reloading => {
+                self.status_message = Some(("Server reloading...".to_string(), Instant::now()));
+                self.should_reconnect = true;
+            }
+            ServerMsg::FullTree { projects, active_project, active_group, active_window } => {
+                // Build preview parsers from screen data
+                self.tree_parsers.clear();
+                for proj in &projects {
+                    for grp in &proj.groups {
+                        for win in &grp.windows {
+                            if !win.screen_data.is_empty() {
+                                let parser = Arc::new(Mutex::new(
+                                    vt100::Parser::new(self.term_rows, self.term_cols, 0),
+                                ));
+                                parser.lock().unwrap().process(&win.screen_data);
+                                self.tree_parsers.insert(win.id, parser);
+                            }
+                        }
+                    }
+                }
+                self.tree_data = projects;
+                self.tree_active_project = active_project;
+                self.tree_active_group = active_group;
+                self.tree_active_window = active_window;
+                // Position cursor on the currently active item
+                self.tree_cursor = self.tree_find_active_index();
             }
         }
     }
@@ -297,5 +353,109 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Build a flattened list of visible tree items, respecting collapsed state
+    pub fn tree_visible_items(&self) -> Vec<TreeItem> {
+        let mut items = Vec::new();
+        for proj in &self.tree_data {
+            let proj_expanded = !self.tree_collapsed_projects.contains(&proj.id);
+            items.push(TreeItem::Project {
+                id: proj.id,
+                name: proj.name.clone(),
+                expanded: proj_expanded,
+            });
+            if proj_expanded {
+                for grp in &proj.groups {
+                    let grp_expanded = !self.tree_collapsed_groups.contains(&grp.id);
+                    items.push(TreeItem::Group {
+                        id: grp.id,
+                        name: grp.name.clone(),
+                        expanded: grp_expanded,
+                    });
+                    if grp_expanded {
+                        for win in &grp.windows {
+                            items.push(TreeItem::Window {
+                                id: win.id,
+                                name: win.name.clone(),
+                                ai_status: win.ai_status.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        items
+    }
+
+    /// Find the index in the visible items list that corresponds to the active window
+    fn tree_find_active_index(&self) -> usize {
+        let items = self.tree_visible_items();
+        // Try to find active window first, then group, then project
+        if let Some(wid) = self.tree_active_window {
+            if let Some(idx) = items.iter().position(|item| matches!(item, TreeItem::Window { id, .. } if *id == wid)) {
+                return idx;
+            }
+        }
+        if let Some(gid) = self.tree_active_group {
+            if let Some(idx) = items.iter().position(|item| matches!(item, TreeItem::Group { id, .. } if *id == gid)) {
+                return idx;
+            }
+        }
+        if let Some(pid) = self.tree_active_project {
+            if let Some(idx) = items.iter().position(|item| matches!(item, TreeItem::Project { id, .. } if *id == pid)) {
+                return idx;
+            }
+        }
+        0
+    }
+
+    /// Get the window ID under the tree cursor, if any
+    pub fn tree_cursor_window_id(&self) -> Option<NodeId> {
+        let items = self.tree_visible_items();
+        match items.get(self.tree_cursor) {
+            Some(TreeItem::Window { id, .. }) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Find the parent group ID for a window in tree_data
+    pub fn tree_parent_group(&self, window_id: NodeId) -> Option<NodeId> {
+        for proj in &self.tree_data {
+            for grp in &proj.groups {
+                for win in &grp.windows {
+                    if win.id == window_id {
+                        return Some(grp.id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find the parent project ID for a group in tree_data
+    pub fn tree_parent_project(&self, group_id: NodeId) -> Option<NodeId> {
+        for proj in &self.tree_data {
+            for grp in &proj.groups {
+                if grp.id == group_id {
+                    return Some(proj.id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the name of a node in tree_data
+    pub fn tree_node_name(&self, id: NodeId) -> Option<String> {
+        for proj in &self.tree_data {
+            if proj.id == id { return Some(proj.name.clone()); }
+            for grp in &proj.groups {
+                if grp.id == id { return Some(grp.name.clone()); }
+                for win in &grp.windows {
+                    if win.id == id { return Some(win.name.clone()); }
+                }
+            }
+        }
+        None
     }
 }

@@ -51,7 +51,29 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `m` | Toggle current window in/out of tile set |
 | `n` / `N` | Cycle focused pane content to next/previous untiled window |
 | `Shift+Arrow` | Resize active pane (Left/Right=width, Up/Down=height) |
+| `u` | Hot reload server binary (upgrade in place) |
+| `f` | Open session tree navigator (with preview) |
 | `?` | Show help overlay |
+
+### Tree Nav Mode
+
+| Key | Action |
+|-----|--------|
+| `q` / `Esc` | Close tree nav |
+| `j` / `Down` | Move cursor down |
+| `k` / `Up` | Move cursor up |
+| `Space` | Toggle collapse/expand on projects and groups |
+| `h` | Fold: collapse current item; on window, collapses parent group |
+| `l` | Expand: expand current item and move to first child |
+| `Enter` | Select item and jump to it |
+| `H` | Collapse one level at a time (groups first, then projects) |
+| `L` | Expand one level at a time (projects first, then groups) |
+| `J` | Jump to next item of same level |
+| `K` | Jump to previous item of same level |
+| `r` | Rename focused item |
+| `x` | Close/kill focused item (window, group, or project) |
+| `g` | Jump to top |
+| `G` | Jump to bottom |
 
 ### Copy Mode
 
@@ -91,6 +113,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `zmux <preset>` | Connect, starting server with preset if needed |
 | `zmux server [preset]` | Run server in foreground |
 | `zmux list` | List available presets |
+| `zmux reload` | Hot reload the server with the current binary |
 | `zmux kill` | Shut down the server |
 
 ## Presets

@@ -29,8 +29,30 @@ async fn main() -> Result<()> {
 
     match cmd {
         Some("server") => {
-            let preset = args.get(2).map(|s| s.as_str());
-            server::run_server(preset).await
+            // Check for --reload flag
+            if args.get(2).map(|s| s.as_str()) == Some("--reload") {
+                let state_path = args.get(3).map(|s| s.as_str())
+                    .expect("--reload requires a state file path");
+                server::run_server_restore(state_path).await
+            } else {
+                let preset = args.get(2).map(|s| s.as_str());
+                server::run_server(preset).await
+            }
+        }
+        Some("reload") => {
+            let sock_path = protocol::socket_path();
+            match tokio::net::UnixStream::connect(&sock_path).await {
+                Ok(stream) => {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let _ = reader;
+                    protocol::write_msg(&mut writer, &protocol::ClientMsg::Reload).await?;
+                    println!("zmux server reloading...");
+                }
+                Err(_) => {
+                    println!("No zmux server running");
+                }
+            }
+            Ok(())
         }
         Some("kill") => {
             let sock_path = protocol::socket_path();
@@ -139,7 +161,10 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
             msg = app.conn.msg_rx.recv() => {
                 match msg {
                     Some(m) => app.apply_server_msg(m),
-                    None => break, // Server disconnected
+                    None => {
+                        // Server disconnected unexpectedly — attempt reconnect
+                        app.should_reconnect = true;
+                    }
                 }
                 while let Ok(m) = app.conn.msg_rx.try_recv() {
                     app.apply_server_msg(m);
@@ -154,6 +179,38 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
                     _ => {}
                 }
             }
+        }
+
+        if app.should_reconnect {
+            app.should_reconnect = false;
+            app.status_message = Some(("Reconnecting...".to_string(), std::time::Instant::now()));
+            terminal.draw(|f| ui::draw(f, app))?;
+
+            let mut reconnected = false;
+            let mut delay = Duration::from_millis(100);
+            for _ in 0..30 {
+                tokio::time::sleep(delay).await;
+                match client::ClientConnection::connect().await {
+                    Ok(new_conn) => {
+                        app.conn = new_conn;
+                        // Clear old parsers — server will send fresh screen dumps
+                        app.parsers.clear();
+                        let (cols, rows) = app.last_size;
+                        let _ = app.conn.send_resize(cols, rows).await;
+                        app.status_message = Some(("Reconnected".to_string(), std::time::Instant::now()));
+                        reconnected = true;
+                        break;
+                    }
+                    Err(_) => {
+                        delay = (delay * 2).min(Duration::from_secs(2));
+                    }
+                }
+            }
+            if !reconnected {
+                app.status_message = Some(("Failed to reconnect".to_string(), std::time::Instant::now()));
+                break;
+            }
+            continue;
         }
 
         if app.should_detach || app.should_quit {

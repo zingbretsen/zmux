@@ -1,4 +1,4 @@
-use crate::app::{App, Mode, TabLevel};
+use crate::app::{App, Mode, TabLevel, TreeItem};
 use crate::protocol::PaneDirection;
 use crate::ui;
 use anyhow::Result;
@@ -25,6 +25,7 @@ pub async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Normal;
             Ok(())
         }
+        Mode::TreeNav => handle_tree_nav_key(app, key).await,
     }
 }
 
@@ -233,6 +234,18 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Normal;
         }
 
+        // Tree nav (session overview)
+        KeyCode::Char('f') => {
+            app.conn.request_tree().await?;
+            app.mode = Mode::TreeNav;
+        }
+
+        // Hot reload server binary
+        KeyCode::Char('u') => {
+            app.conn.reload().await?;
+            app.mode = Mode::Normal;
+        }
+
         // Help
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
@@ -287,11 +300,16 @@ async fn handle_ai_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
 }
 
 async fn handle_rename_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    let from_tree = !app.tree_data.is_empty();
     match key.code {
         KeyCode::Esc => {
             app.rename_buf.clear();
             app.rename_target = None;
-            app.mode = Mode::Nav;
+            if from_tree {
+                app.mode = Mode::TreeNav;
+            } else {
+                app.mode = Mode::Nav;
+            }
         }
         KeyCode::Enter => {
             if let Some(id) = app.rename_target.take() {
@@ -300,7 +318,13 @@ async fn handle_rename_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
                 }
             }
             app.rename_buf.clear();
-            app.mode = Mode::Normal;
+            if from_tree {
+                // Refresh tree data and return to tree nav
+                app.conn.request_tree().await?;
+                app.mode = Mode::TreeNav;
+            } else {
+                app.mode = Mode::Normal;
+            }
         }
         KeyCode::Backspace => {
             app.rename_buf.pop();
@@ -459,6 +483,305 @@ async fn handle_search_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
         _ => {}
     }
     Ok(())
+}
+
+async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    let items = app.tree_visible_items();
+    let count = items.len();
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.tree_data.clear();
+            app.tree_parsers.clear();
+            app.mode = Mode::Normal;
+        }
+
+        KeyCode::Char('j') | KeyCode::Down => {
+            if count > 0 {
+                app.tree_cursor = (app.tree_cursor + 1).min(count - 1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.tree_cursor = app.tree_cursor.saturating_sub(1);
+        }
+
+        KeyCode::Char('g') => {
+            app.tree_cursor = 0;
+        }
+        KeyCode::Char('G') => {
+            if count > 0 {
+                app.tree_cursor = count - 1;
+            }
+        }
+
+        // Toggle collapse/expand
+        KeyCode::Char(' ') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                match item {
+                    TreeItem::Project { id, .. } => {
+                        if app.tree_collapsed_projects.contains(id) {
+                            app.tree_collapsed_projects.remove(id);
+                        } else {
+                            app.tree_collapsed_projects.insert(*id);
+                        }
+                    }
+                    TreeItem::Group { id, .. } => {
+                        if app.tree_collapsed_groups.contains(id) {
+                            app.tree_collapsed_groups.remove(id);
+                        } else {
+                            app.tree_collapsed_groups.insert(*id);
+                        }
+                    }
+                    TreeItem::Window { .. } => {}
+                }
+            }
+        }
+
+        // h = always fold / go up
+        KeyCode::Char('h') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                match item {
+                    TreeItem::Project { id, expanded, .. } => {
+                        if *expanded {
+                            app.tree_collapsed_projects.insert(*id);
+                        }
+                        // Already collapsed: no-op
+                    }
+                    TreeItem::Group { id, expanded, .. } => {
+                        if *expanded {
+                            // Collapse the group
+                            app.tree_collapsed_groups.insert(*id);
+                        } else {
+                            // Already collapsed: collapse parent project and move cursor there
+                            if let Some(pid) = app.tree_parent_project(*id) {
+                                app.tree_collapsed_projects.insert(pid);
+                                let new_items = app.tree_visible_items();
+                                if let Some(idx) = new_items.iter().position(
+                                    |it| matches!(it, TreeItem::Project { id: pid2, .. } if *pid2 == pid)
+                                ) {
+                                    app.tree_cursor = idx;
+                                }
+                            }
+                        }
+                    }
+                    TreeItem::Window { id, .. } => {
+                        // Collapse parent group and move cursor there
+                        if let Some(gid) = app.tree_parent_group(*id) {
+                            app.tree_collapsed_groups.insert(gid);
+                            let new_items = app.tree_visible_items();
+                            if let Some(idx) = new_items.iter().position(
+                                |it| matches!(it, TreeItem::Group { id: gid2, .. } if *gid2 == gid)
+                            ) {
+                                app.tree_cursor = idx;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // l = always expand / go into first child
+        KeyCode::Char('l') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                match item {
+                    TreeItem::Project { id, expanded, .. } => {
+                        if !*expanded {
+                            app.tree_collapsed_projects.remove(id);
+                        }
+                        // Move to first child (next item after this project)
+                        let new_items = app.tree_visible_items();
+                        let new_count = new_items.len();
+                        if app.tree_cursor + 1 < new_count {
+                            app.tree_cursor += 1;
+                        }
+                    }
+                    TreeItem::Group { id, expanded, .. } => {
+                        if !*expanded {
+                            app.tree_collapsed_groups.remove(id);
+                        }
+                        // Move to first child (next item after this group)
+                        let new_items = app.tree_visible_items();
+                        let new_count = new_items.len();
+                        if app.tree_cursor + 1 < new_count {
+                            app.tree_cursor += 1;
+                        }
+                    }
+                    TreeItem::Window { .. } => {
+                        // Windows have no children, no-op
+                    }
+                }
+            }
+        }
+
+        // H = collapse one level at a time
+        KeyCode::Char('H') => {
+            let cursor_id = items.get(app.tree_cursor).map(|it| tree_item_id(it));
+            // If any groups are expanded, collapse all groups first
+            let any_group_expanded = app.tree_data.iter().any(|proj| {
+                !app.tree_collapsed_projects.contains(&proj.id)
+                    && proj.groups.iter().any(|grp| !app.tree_collapsed_groups.contains(&grp.id))
+            });
+            if any_group_expanded {
+                for proj in &app.tree_data {
+                    for grp in &proj.groups {
+                        app.tree_collapsed_groups.insert(grp.id);
+                    }
+                }
+            } else {
+                // All groups collapsed (or hidden); collapse all projects
+                for proj in &app.tree_data {
+                    app.tree_collapsed_projects.insert(proj.id);
+                }
+            }
+            // Try to keep cursor on the same item (or its nearest ancestor)
+            if let Some(cid) = cursor_id {
+                tree_follow_cursor(app, cid);
+            }
+        }
+
+        // L = expand one level at a time
+        KeyCode::Char('L') => {
+            let cursor_id = items.get(app.tree_cursor).map(|it| tree_item_id(it));
+            // If any projects are collapsed, expand all projects first
+            let any_project_collapsed = app.tree_data.iter().any(|proj| {
+                app.tree_collapsed_projects.contains(&proj.id)
+            });
+            if any_project_collapsed {
+                app.tree_collapsed_projects.clear();
+            } else {
+                // All projects expanded; expand all groups
+                app.tree_collapsed_groups.clear();
+            }
+            // Keep cursor on the same item
+            if let Some(cid) = cursor_id {
+                tree_follow_cursor(app, cid);
+            }
+        }
+
+        // J = next item of same level
+        KeyCode::Char('J') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                let target_level = tree_item_level(item);
+                for i in (app.tree_cursor + 1)..count {
+                    if tree_item_level(&items[i]) == target_level {
+                        app.tree_cursor = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // K = previous item of same level
+        KeyCode::Char('K') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                let target_level = tree_item_level(item);
+                for i in (0..app.tree_cursor).rev() {
+                    if tree_item_level(&items[i]) == target_level {
+                        app.tree_cursor = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // r = rename item under cursor
+        KeyCode::Char('r') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                let id = tree_item_id(item);
+                let name = app.tree_node_name(id).unwrap_or_default();
+                app.rename_buf = name;
+                app.rename_target = Some(id);
+                app.mode = Mode::Rename;
+            }
+        }
+
+        // x = close/kill item under cursor
+        KeyCode::Char('x') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                let id = tree_item_id(item);
+                app.conn.close_node(id).await?;
+                // Refresh tree after close
+                app.conn.request_tree().await?;
+            }
+        }
+
+        // Select item and navigate
+        KeyCode::Enter => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                match item {
+                    TreeItem::Project { id, .. } => {
+                        app.conn.select_project(*id).await?;
+                    }
+                    TreeItem::Group { id, .. } => {
+                        app.conn.select_group(*id).await?;
+                    }
+                    TreeItem::Window { id, .. } => {
+                        app.conn.select_window(*id).await?;
+                    }
+                }
+            }
+            app.tree_data.clear();
+            app.tree_parsers.clear();
+            app.mode = Mode::Normal;
+        }
+
+        _ => {}
+    }
+
+    // Clamp cursor after potential collapse changes
+    let new_count = app.tree_visible_items().len();
+    if new_count > 0 && app.tree_cursor >= new_count {
+        app.tree_cursor = new_count - 1;
+    }
+
+    Ok(())
+}
+
+fn tree_item_level(item: &TreeItem) -> u8 {
+    match item {
+        TreeItem::Project { .. } => 0,
+        TreeItem::Group { .. } => 1,
+        TreeItem::Window { .. } => 2,
+    }
+}
+
+fn tree_item_id(item: &TreeItem) -> crate::protocol::NodeId {
+    match item {
+        TreeItem::Project { id, .. } => *id,
+        TreeItem::Group { id, .. } => *id,
+        TreeItem::Window { id, .. } => *id,
+    }
+}
+
+/// After a collapse/expand operation, find the item by ID in the new visible list.
+/// If the item is no longer visible (collapsed away), find its nearest visible ancestor.
+fn tree_follow_cursor(app: &mut App, target_id: crate::protocol::NodeId) {
+    let new_items = app.tree_visible_items();
+    // Try exact match first
+    if let Some(idx) = new_items.iter().position(|it| tree_item_id(it) == target_id) {
+        app.tree_cursor = idx;
+        return;
+    }
+    // Item was collapsed away — find parent group, then parent project
+    if let Some(gid) = app.tree_parent_group(target_id) {
+        if let Some(idx) = new_items.iter().position(|it| tree_item_id(it) == gid) {
+            app.tree_cursor = idx;
+            return;
+        }
+        // Group also collapsed, find project
+        if let Some(pid) = app.tree_parent_project(gid) {
+            if let Some(idx) = new_items.iter().position(|it| tree_item_id(it) == pid) {
+                app.tree_cursor = idx;
+                return;
+            }
+        }
+    }
+    if let Some(pid) = app.tree_parent_project(target_id) {
+        if let Some(idx) = new_items.iter().position(|it| tree_item_id(it) == pid) {
+            app.tree_cursor = idx;
+            return;
+        }
+    }
 }
 
 async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {

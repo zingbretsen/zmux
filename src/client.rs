@@ -178,4 +178,16 @@ impl ClientConnection {
     pub async fn send_input_to_window(&self, window_id: NodeId, data: Vec<u8>) -> Result<()> {
         self.send(ClientMsg::InputToWindow { window_id, data }).await
     }
+
+    pub async fn reload(&self) -> Result<()> {
+        self.send(ClientMsg::Reload).await
+    }
+
+    pub async fn close_node(&self, id: NodeId) -> Result<()> {
+        self.send(ClientMsg::CloseNode { id }).await
+    }
+
+    pub async fn request_tree(&self) -> Result<()> {
+        self.send(ClientMsg::RequestTree).await
+    }
 }

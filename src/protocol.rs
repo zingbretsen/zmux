@@ -217,8 +217,14 @@ pub enum ClientMsg {
     ResizePane { direction: PaneDirection },
     /// Cycle the focused pane's content to the next/prev untiled window
     CyclePaneContent { forward: bool },
+    /// Close a specific node by ID (window, group, or project)
+    CloseNode { id: NodeId },
+    /// Request full session tree (for tree nav)
+    RequestTree,
     /// Shut down the server
     Shutdown,
+    /// Hot reload: server serializes state, exec()s new binary
+    Reload,
 }
 
 // Server → Client
@@ -251,6 +257,15 @@ pub enum ServerMsg {
     BranchList { branches: Vec<String> },
     /// List of available presets
     PresetList { presets: Vec<String> },
+    /// Server is about to exec() for hot reload; clients should reconnect
+    Reloading,
+    /// Full session tree (for tree nav)
+    FullTree {
+        projects: Vec<TreeProject>,
+        active_project: Option<NodeId>,
+        active_group: Option<NodeId>,
+        active_window: Option<NodeId>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +274,30 @@ pub struct TabEntry {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_status: Option<crate::ai_detect::AiStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeProject {
+    pub id: NodeId,
+    pub name: String,
+    pub groups: Vec<TreeGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeGroup {
+    pub id: NodeId,
+    pub name: String,
+    pub windows: Vec<TreeWindow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeWindow {
+    pub id: NodeId,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_status: Option<crate::ai_detect::AiStatus>,
+    /// Screen dump for preview (ANSI bytes)
+    pub screen_data: Vec<u8>,
 }
 
 /// Socket path

@@ -1,6 +1,6 @@
 use crate::ai_detect::{self, AiStatus};
 use crate::config;
-use crate::protocol::{LayoutMode, NodeId, PaneDirection, ServerMsg, TabEntry, TileLayout};
+use crate::protocol::{LayoutMode, NodeId, PaneDirection, ServerMsg, TabEntry, TileLayout, TreeGroup, TreeProject, TreeWindow};
 use crate::pty::PtyHandle;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -66,6 +66,14 @@ impl SessionTree {
             active_window: None,
             shell: None,
         }
+    }
+
+    pub(crate) fn next_id(&self) -> NodeId {
+        self.next_id
+    }
+
+    pub(crate) fn set_next_id(&mut self, id: NodeId) {
+        self.next_id = id;
     }
 
     fn alloc_id(&mut self) -> NodeId {
@@ -241,6 +249,40 @@ impl SessionTree {
         }
 
         worktree_info
+    }
+
+    /// Remove a project and all its groups/windows. Returns list of (project_dir, worktree_path) for cleanup.
+    pub(crate) fn remove_project(&mut self, project_id: NodeId) -> Vec<(PathBuf, PathBuf)> {
+        let group_ids = match self.nodes.get(&project_id) {
+            Some(Node::Project(p)) => p.children.clone(),
+            _ => return Vec::new(),
+        };
+
+        let mut worktree_infos = Vec::new();
+        for gid in &group_ids {
+            if let Some(info) = self.remove_group(*gid) {
+                worktree_infos.push(info);
+            }
+        }
+
+        // remove_group may have already cleaned up the project if it became empty,
+        // but if not, clean up now
+        if self.nodes.contains_key(&project_id) {
+            self.nodes.remove(&project_id);
+            self.root_children.retain(|id| *id != project_id);
+        }
+
+        if self.active_project == Some(project_id) {
+            self.active_project = self.root_children.first().copied();
+            if let Some(pid) = self.active_project {
+                self.select_project(pid);
+            } else {
+                self.active_group = None;
+                self.active_window = None;
+            }
+        }
+
+        worktree_infos
     }
 
     pub(crate) fn move_window_to_group(&mut self, window_id: NodeId, new_group_id: NodeId) {
@@ -795,6 +837,40 @@ impl SessionTree {
             }
             _ => None,
         }
+    }
+
+    /// Build the full session tree for tree nav mode
+    pub(crate) fn full_tree(&self) -> Vec<TreeProject> {
+        self.root_children.iter().filter_map(|&pid| {
+            match self.nodes.get(&pid) {
+                Some(Node::Project(p)) => {
+                    let groups = p.children.iter().filter_map(|&gid| {
+                        match self.nodes.get(&gid) {
+                            Some(Node::Group(g)) => {
+                                let windows = g.children.iter().filter_map(|&wid| {
+                                    match self.nodes.get(&wid) {
+                                        Some(Node::Window(w)) => {
+                                            let screen_data = self.screen_dump(wid).unwrap_or_default();
+                                            Some(TreeWindow {
+                                                id: wid,
+                                                name: w.name.clone(),
+                                                ai_status: w.ai_status.clone(),
+                                                screen_data,
+                                            })
+                                        }
+                                        _ => None,
+                                    }
+                                }).collect();
+                                Some(TreeGroup { id: gid, name: g.name.clone(), windows })
+                            }
+                            _ => None,
+                        }
+                    }).collect();
+                    Some(TreeProject { id: pid, name: p.name.clone(), groups })
+                }
+                _ => None,
+            }
+        }).collect()
     }
 }
 
