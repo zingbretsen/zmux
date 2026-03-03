@@ -92,6 +92,8 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `Ctrl+D` | Scroll down half page |
 | `PageUp` | Scroll up full page |
 | `PageDown` | Scroll down full page |
+| `Mouse ScrollUp` | Scroll up (enters copy mode automatically) |
+| `Mouse ScrollDown` | Scroll down (exits copy mode at bottom) |
 | `g` | Jump to top of scrollback |
 | `G` | Jump to bottom (live view) |
 | `Space` | Start/cancel selection |

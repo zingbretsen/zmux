@@ -928,51 +928,122 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
             app.copy_cursor_col = screen_cols - 1;
         }
         KeyCode::Char('w') => {
-            // Jump to next word: skip non-space, then skip space
+            // Jump to next word: skip non-space, then skip space, wrapping lines
             if let Some(wid) = app.active_window {
                 if let Some(parser) = app.parser_for(wid) {
                     let p = parser.lock().unwrap();
                     let mut col = app.copy_cursor_col;
-                    let row = app.copy_cursor_row;
+                    let mut row = app.copy_cursor_row;
+                    let mut scroll = app.copy_scroll_offset;
                     // Skip current word (non-spaces)
-                    while col < screen_cols - 1 {
+                    loop {
+                        if col >= screen_cols - 1 {
+                            break;
+                        }
                         if let Some(cell) = p.screen().cell(row, col) {
                             if cell.contents().trim().is_empty() { break; }
                         }
                         col += 1;
                     }
-                    // Skip spaces
-                    while col < screen_cols - 1 {
-                        if let Some(cell) = p.screen().cell(row, col) {
-                            if !cell.contents().trim().is_empty() { break; }
+                    // Skip spaces, wrapping to next line if needed
+                    let mut found = false;
+                    loop {
+                        while col < screen_cols {
+                            if let Some(cell) = p.screen().cell(row, col) {
+                                if !cell.contents().trim().is_empty() {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            col += 1;
                         }
-                        col += 1;
+                        if found { break; }
+                        // Wrap to next line
+                        if row < screen_rows - 1 {
+                            row += 1;
+                            col = 0;
+                        } else if scroll > 0 {
+                            scroll = scroll.saturating_sub(1);
+                            col = 0;
+                            // row stays at bottom
+                        } else {
+                            // At the very bottom, can't go further
+                            col = screen_cols - 1;
+                            break;
+                        }
                     }
+                    drop(p);
+                    if scroll != app.copy_scroll_offset {
+                        set_scrollback(app, scroll);
+                        app.copy_scroll_offset = scroll;
+                    }
+                    app.copy_cursor_row = row;
                     app.copy_cursor_col = col;
                 }
             }
         }
         KeyCode::Char('b') => {
-            // Jump to previous word
+            // Jump to previous word, wrapping lines
             if let Some(wid) = app.active_window {
                 if let Some(parser) = app.parser_for(wid) {
                     let p = parser.lock().unwrap();
                     let mut col = app.copy_cursor_col;
-                    let row = app.copy_cursor_row;
-                    // Skip spaces backward
-                    while col > 0 {
-                        col -= 1;
-                        if let Some(cell) = p.screen().cell(row, col) {
-                            if !cell.contents().trim().is_empty() { break; }
+                    let mut row = app.copy_cursor_row;
+                    let mut scroll = app.copy_scroll_offset;
+                    // Skip spaces backward, wrapping to previous line if needed
+                    let mut found_nonspace = false;
+                    loop {
+                        while col > 0 {
+                            col -= 1;
+                            if let Some(cell) = p.screen().cell(row, col) {
+                                if !cell.contents().trim().is_empty() {
+                                    found_nonspace = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if found_nonspace { break; }
+                        // Check col 0
+                        if col == 0 {
+                            if let Some(cell) = p.screen().cell(row, col) {
+                                if !cell.contents().trim().is_empty() {
+                                    found_nonspace = true;
+                                    break;
+                                }
+                            }
+                        }
+                        // Wrap to previous line
+                        if row > 0 {
+                            row -= 1;
+                            col = screen_cols - 1;
+                        } else {
+                            let new_scroll = scroll.saturating_add(1);
+                            let actual = max_scrollback(app);
+                            if new_scroll <= actual {
+                                scroll = new_scroll;
+                                col = screen_cols - 1;
+                                // row stays at top
+                            } else {
+                                // At the very top
+                                break;
+                            }
                         }
                     }
-                    // Skip word backward
-                    while col > 0 {
-                        if let Some(cell) = p.screen().cell(row, col - 1) {
-                            if cell.contents().trim().is_empty() { break; }
+                    if found_nonspace {
+                        // Skip word backward (find start of this word)
+                        while col > 0 {
+                            if let Some(cell) = p.screen().cell(row, col - 1) {
+                                if cell.contents().trim().is_empty() { break; }
+                            }
+                            col -= 1;
                         }
-                        col -= 1;
                     }
+                    drop(p);
+                    if scroll != app.copy_scroll_offset {
+                        set_scrollback(app, scroll);
+                        app.copy_scroll_offset = scroll;
+                    }
+                    app.copy_cursor_row = row;
                     app.copy_cursor_col = col;
                 }
             }
@@ -985,6 +1056,16 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
         }
         KeyCode::Char('d') if ctrl => {
             app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(half_page);
+            set_scrollback(app, app.copy_scroll_offset);
+        }
+        KeyCode::PageUp => {
+            let full_page = screen_rows as usize;
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(full_page);
+            app.copy_scroll_offset = set_scrollback(app, app.copy_scroll_offset);
+        }
+        KeyCode::PageDown => {
+            let full_page = screen_rows as usize;
+            app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(full_page);
             set_scrollback(app, app.copy_scroll_offset);
         }
         KeyCode::Char('g') if !app.copy_selecting => {
@@ -1052,15 +1133,70 @@ pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -
         }
     }
 
-    if app.mode != Mode::Normal {
-        return Ok(());
+    match app.mode {
+        Mode::Normal => {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    // Enter copy/scrollback mode and scroll up
+                    app.copy_scroll_offset = 0;
+                    app.copy_selecting = false;
+                    if let Some(wid) = app.active_window {
+                        if let Some(parser) = app.parser_for(wid) {
+                            let p = parser.lock().unwrap();
+                            let pos = p.screen().cursor_position();
+                            app.copy_cursor_row = pos.0;
+                            app.copy_cursor_col = pos.1;
+                        }
+                    }
+                    app.mode = Mode::Copy;
+                    // Scroll up by 3 lines
+                    if let Some(wid) = app.active_window {
+                        if let Some(parser) = app.parser_for(wid) {
+                            let mut p = parser.lock().unwrap();
+                            app.copy_scroll_offset = 3;
+                            p.set_scrollback(app.copy_scroll_offset);
+                            app.copy_scroll_offset = p.screen().scrollback();
+                        }
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    // In normal mode, scroll down does nothing (already at bottom)
+                }
+                _ => {}
+            }
+        }
+        Mode::Copy => {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(wid) = app.active_window {
+                        if let Some(parser) = app.parser_for(wid) {
+                            let mut p = parser.lock().unwrap();
+                            app.copy_scroll_offset = app.copy_scroll_offset.saturating_add(3);
+                            p.set_scrollback(app.copy_scroll_offset);
+                            app.copy_scroll_offset = p.screen().scrollback();
+                        }
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(wid) = app.active_window {
+                        if let Some(parser) = app.parser_for(wid) {
+                            let mut p = parser.lock().unwrap();
+                            app.copy_scroll_offset = app.copy_scroll_offset.saturating_sub(3);
+                            p.set_scrollback(app.copy_scroll_offset);
+                            app.copy_scroll_offset = p.screen().scrollback();
+                            // Exit copy mode if scrolled back to bottom
+                            if app.copy_scroll_offset == 0 {
+                                app.copy_selecting = false;
+                                app.mode = Mode::Normal;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
     }
-    let bytes = match mouse.kind {
-        MouseEventKind::ScrollUp => b"\x1b[5~".to_vec(),
-        MouseEventKind::ScrollDown => b"\x1b[6~".to_vec(),
-        _ => return Ok(()),
-    };
-    app.conn.send_input(bytes).await?;
     Ok(())
 }
 
