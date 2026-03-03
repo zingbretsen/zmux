@@ -74,7 +74,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `K` | Jump to previous item of same level |
 | `r` | Rename focused item |
 | `x` | Close/kill focused item (window, group, or project) |
-| `c` | Send Ctrl-C (interrupt) to the focused window |
+| `c` | Send Ctrl-C (interrupt) to focused item (all windows if group/project) |
 | `g` | Jump to top |
 | `G` | Jump to bottom |
 | Click item | Select item and jump to it |

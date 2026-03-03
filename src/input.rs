@@ -708,11 +708,37 @@ async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) ->
             }
         }
 
-        // c = send Ctrl-C (interrupt) to the window under cursor
+        // c = send Ctrl-C (interrupt) to window(s) under cursor
         KeyCode::Char('c') => {
-            if let Some(TreeItem::Window { id, .. }) = items.get(app.tree_cursor) {
-                app.conn.send_input_to_window(*id, vec![0x03]).await?;
-                // Refresh tree to update preview
+            if let Some(item) = items.get(app.tree_cursor) {
+                match item {
+                    TreeItem::Window { id, .. } => {
+                        app.conn.send_input_to_window(*id, vec![0x03]).await?;
+                    }
+                    TreeItem::Group { id, .. } => {
+                        for proj in &app.tree_data {
+                            for grp in &proj.groups {
+                                if grp.id == *id {
+                                    for win in &grp.windows {
+                                        app.conn.send_input_to_window(win.id, vec![0x03]).await?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    TreeItem::Project { id, .. } => {
+                        for proj in &app.tree_data {
+                            if proj.id == *id {
+                                for grp in &proj.groups {
+                                    for win in &grp.windows {
+                                        app.conn.send_input_to_window(win.id, vec![0x03]).await?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Refresh tree to update previews
                 app.conn.request_tree().await?;
             }
         }
