@@ -307,6 +307,7 @@ pub fn socket_path() -> std::path::PathBuf {
         let _ = std::fs::create_dir_all(&dir);
         dir.join("server.sock")
     } else {
+        // SAFETY: getuid() is always safe to call — no preconditions, no failure modes
         let uid = unsafe { libc::getuid() };
         let dir = std::path::PathBuf::from(format!("/tmp/zmux-{}", uid));
         let _ = std::fs::create_dir_all(&dir);

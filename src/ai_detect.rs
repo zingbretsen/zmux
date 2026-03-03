@@ -17,24 +17,6 @@ pub enum AiStatus {
     Finished { tool: String },
 }
 
-#[allow(dead_code)]
-impl AiStatus {
-    pub fn symbol(&self) -> &'static str {
-        match self {
-            AiStatus::Running { .. } => "●",
-            AiStatus::Idle { .. } => "◐",
-            AiStatus::Finished { .. } => "○",
-        }
-    }
-
-    pub fn tool_name(&self) -> &str {
-        match self {
-            AiStatus::Running { tool, .. }
-            | AiStatus::Idle { tool, .. }
-            | AiStatus::Finished { tool, .. } => tool,
-        }
-    }
-}
 
 /// Detect AI tool processes among descendants of the given PID.
 /// Uses CPU time delta to determine Running vs Idle:

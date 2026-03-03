@@ -184,18 +184,18 @@ impl App {
                 self.pane_weights = pane_weights.into_iter().map(|(id, w, h)| (id, (w, h))).collect();
 
                 // Clean up parsers for windows that no longer exist
-                let window_ids: Vec<NodeId> = self.windows.iter().map(|e| e.id).collect();
+                let window_ids: HashSet<NodeId> = self.windows.iter().map(|e| e.id).collect();
                 self.parsers.retain(|id, _| window_ids.contains(id));
             }
             ServerMsg::ScreenDump { window_id, data } => {
                 let parser = self.get_parser(window_id);
-                let mut parser = parser.lock().unwrap();
+                let mut parser = parser.lock().unwrap_or_else(|e| e.into_inner());
                 parser.process(b"\x1b[2J\x1b[H");
                 parser.process(&data);
             }
             ServerMsg::PtyOutput { window_id, data } => {
                 let parser = self.get_parser(window_id);
-                parser.lock().unwrap().process(&data);
+                parser.lock().unwrap_or_else(|e| e.into_inner()).process(&data);
             }
             ServerMsg::Info { message } => {
                 self.status_message = Some((message, Instant::now()));
@@ -252,7 +252,7 @@ impl App {
             self.term_cols = cols.saturating_sub(2);
             // Resize all existing parsers
             for parser in self.parsers.values() {
-                parser.lock().unwrap().set_size(self.term_rows, self.term_cols);
+                parser.lock().unwrap_or_else(|e| e.into_inner()).set_size(self.term_rows, self.term_cols);
             }
             self.conn.send_resize(cols, rows).await?;
         }

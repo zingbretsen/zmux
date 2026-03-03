@@ -65,11 +65,12 @@ pub fn is_dirty(wt_path: &Path) -> bool {
 
 /// Remove a git worktree. Use force=true to remove even with uncommitted changes.
 pub fn remove(project_dir: &Path, wt_path: &Path, force: bool) -> Result<()> {
+    let wt_str = wt_path.to_string_lossy();
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
     }
-    args.push(&wt_path.to_str().unwrap_or(""));
+    args.push(&wt_str);
 
     let output = Command::new("git")
         .args(&args)
@@ -101,18 +102,3 @@ pub fn list_branches(project_dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// List existing worktree branches under .worktrees/
-#[allow(dead_code)]
-pub fn list_worktrees(project_dir: &Path) -> Vec<String> {
-    let worktrees_dir = project_dir.join(".worktrees");
-    if !worktrees_dir.exists() {
-        return Vec::new();
-    }
-    std::fs::read_dir(&worktrees_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect()
-}

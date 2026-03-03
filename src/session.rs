@@ -42,7 +42,6 @@ pub(crate) struct GroupNode {
 
 pub(crate) struct WindowNode {
     pub(crate) name: String,
-    #[allow(dead_code)]
     pub(crate) parent: NodeId,
     pub(crate) pty: PtyHandle,
     pub(crate) ai_status: Option<AiStatus>,
@@ -533,7 +532,7 @@ impl SessionTree {
                     if let Some(Node::Group(g)) = self.nodes.get(&gid) {
                         for &wid in &g.children {
                             if let Some(Node::Window(w)) = self.nodes.get(&wid) {
-                                let parser = w.pty.parser.lock().unwrap();
+                                let parser = w.pty.parser.lock().unwrap_or_else(|e| e.into_inner());
                                 let screen = parser.screen();
                                 let (rows, cols) = screen.size();
                                 let mut text = String::new();
@@ -759,15 +758,15 @@ impl SessionTree {
         false
     }
 
-    pub(crate) fn active_tiled_windows(&self) -> Vec<NodeId> {
+    pub(crate) fn active_tiled_windows(&self) -> &[NodeId] {
         if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
                 if g.layout_mode == LayoutMode::Tiled {
-                    return g.tiled_windows.clone();
+                    return &g.tiled_windows;
                 }
             }
         }
-        Vec::new()
+        &[]
     }
 
     pub(crate) fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
@@ -875,7 +874,7 @@ impl SessionTree {
     pub(crate) fn screen_dump(&self, window_id: NodeId) -> Option<Vec<u8>> {
         match self.nodes.get(&window_id) {
             Some(Node::Window(w)) => {
-                let parser = w.pty.parser.lock().unwrap();
+                let parser = w.pty.parser.lock().unwrap_or_else(|e| e.into_inner());
                 Some(screen_to_ansi(parser.screen()))
             }
             _ => None,
@@ -1076,7 +1075,6 @@ fn screen_to_ansi(screen: &vt100::Screen) -> Vec<u8> {
     out.extend_from_slice(b"\x1b[H\x1b[2J\x1b[0m");
     // Use the vt100 library's built-in method which preserves colors and attributes
     out.extend_from_slice(&screen.contents_formatted());
-    // Restore cursor position
     let cursor = screen.cursor_position();
     out.extend_from_slice(format!("\x1b[{};{}H", cursor.0 + 1, cursor.1 + 1).as_bytes());
     out

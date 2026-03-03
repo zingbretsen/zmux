@@ -40,7 +40,10 @@ pub struct Config {
 pub fn load_config() -> Config {
     let path = dirs_or_default().join("config.toml");
     match std::fs::read_to_string(&path) {
-        Ok(content) => toml::from_str(&content).unwrap_or_default(),
+        Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
+            eprintln!("Warning: failed to parse {}: {}", path.display(), e);
+            Config::default()
+        }),
         Err(_) => Config::default(),
     }
 }
@@ -82,7 +85,7 @@ pub fn list_presets() -> Result<Vec<String>> {
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().map_or(false, |e| e == "toml") {
+        if path.extension().is_some_and(|e| e == "toml") {
             if let Some(stem) = path.file_stem() {
                 presets.push(stem.to_string_lossy().to_string());
             }

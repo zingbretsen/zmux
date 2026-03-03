@@ -69,16 +69,6 @@ impl ClientConnection {
         self.send(ClientMsg::NewWindow { name }).await
     }
 
-    #[allow(dead_code)]
-    pub async fn new_group(&self, name: Option<String>) -> Result<()> {
-        self.send(ClientMsg::NewGroup { name }).await
-    }
-
-    #[allow(dead_code)]
-    pub async fn new_project(&self, name: Option<String>) -> Result<()> {
-        self.send(ClientMsg::NewProject { name }).await
-    }
-
     pub async fn set_project_dir(&self) -> Result<()> {
         self.send(ClientMsg::SetProjectDir).await
     }

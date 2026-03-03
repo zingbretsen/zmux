@@ -642,7 +642,7 @@ async fn handle_client(
             }
         }
         // Also send screen dumps for tiled windows
-        for wid in st.session.active_tiled_windows() {
+        for &wid in st.session.active_tiled_windows() {
             if Some(wid) != st.session.active_window {
                 if let Some(data) = st.session.screen_dump(wid) {
                     let _ = client_tx.send(ServerMsg::ScreenDump {
@@ -831,7 +831,7 @@ async fn handle_client(
                         });
                     }
                 }
-                for wid in st.session.active_tiled_windows() {
+                for &wid in st.session.active_tiled_windows() {
                     if Some(wid) != st.session.active_window {
                         if let Some(data) = st.session.screen_dump(wid) {
                             let _ = client_tx.send(ServerMsg::ScreenDump {
@@ -1335,10 +1335,12 @@ async fn handle_client(
                 let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(3);
                 let cols = cols.saturating_sub(2);
-                let _ = st.session.resize_all(term_rows, cols);
+                if let Err(e) = st.session.resize_all(term_rows, cols) {
+                    warn!("resize_all failed: {}", e);
+                }
                 let tab = st.session.tab_state();
                 st.broadcast(tab);
-                for wid in st.session.active_tiled_windows() {
+                for &wid in st.session.active_tiled_windows() {
                     if let Some(data) = st.session.screen_dump(wid) {
                         st.broadcast(ServerMsg::ScreenDump {
                             window_id: wid,
@@ -1360,10 +1362,12 @@ async fn handle_client(
                 let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(3);
                 let cols = cols.saturating_sub(2);
-                let _ = st.session.resize_all(term_rows, cols);
+                if let Err(e) = st.session.resize_all(term_rows, cols) {
+                    warn!("resize_all failed: {}", e);
+                }
                 let tab = st.session.tab_state();
                 st.broadcast(tab);
-                for wid in st.session.active_tiled_windows() {
+                for &wid in st.session.active_tiled_windows() {
                     if let Some(data) = st.session.screen_dump(wid) {
                         st.broadcast(ServerMsg::ScreenDump {
                             window_id: wid,
@@ -1377,10 +1381,12 @@ async fn handle_client(
                 let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(3);
                 let cols = cols.saturating_sub(2);
-                let _ = st.session.resize_all(term_rows, cols);
+                if let Err(e) = st.session.resize_all(term_rows, cols) {
+                    warn!("resize_all failed: {}", e);
+                }
                 let tab = st.session.tab_state();
                 st.broadcast(tab);
-                for wid in st.session.active_tiled_windows() {
+                for &wid in st.session.active_tiled_windows() {
                     if let Some(data) = st.session.screen_dump(wid) {
                         st.broadcast(ServerMsg::ScreenDump {
                             window_id: wid,
@@ -1397,7 +1403,7 @@ async fn handle_client(
                     let _ = st.session.resize_all(term_rows, cols);
                     let tab = st.session.tab_state();
                     st.broadcast(tab);
-                    for wid in st.session.active_tiled_windows() {
+                    for &wid in st.session.active_tiled_windows() {
                         if let Some(data) = st.session.screen_dump(wid) {
                             st.broadcast(ServerMsg::ScreenDump {
                                 window_id: wid,
@@ -1421,7 +1427,9 @@ async fn handle_client(
                 let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(3);
                 let cols = cols.saturating_sub(2);
-                let _ = st.session.resize_all(term_rows, cols);
+                if let Err(e) = st.session.resize_all(term_rows, cols) {
+                    warn!("resize_all failed: {}", e);
+                }
                 let tab = st.session.tab_state();
                 st.broadcast(tab);
                 if let Some(gid) = st.session.active_group {
@@ -1458,6 +1466,8 @@ async fn handle_client(
             }
             ClientMsg::Detach => break,
             ClientMsg::Shutdown => {
+                info!("Shutdown requested");
+                let _ = std::fs::remove_file(protocol::socket_path());
                 std::process::exit(0);
             }
             ClientMsg::Reload => {
