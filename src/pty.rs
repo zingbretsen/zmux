@@ -108,6 +108,14 @@ impl PtyHandle {
             let stderr_fd = unsafe { libc::dup(slave) };
 
             let mut cmd = std::process::Command::new(&shell);
+            // Set argv[0] to "-shellname" so the shell runs as a login shell.
+            // This is the POSIX convention used by login(1) and tmux, ensuring
+            // that login profiles (~/.zprofile, ~/.bash_profile, etc.) are sourced.
+            let shell_basename = Path::new(&shell)
+                .file_name()
+                .unwrap_or(std::ffi::OsStr::new("sh"))
+                .to_string_lossy();
+            cmd.arg0(format!("-{}", shell_basename));
             cmd.current_dir(cwd);
             for (k, v) in env {
                 cmd.env(k, v);
