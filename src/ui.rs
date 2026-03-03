@@ -17,7 +17,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
     draw_tab_bar(f, app, chunks[0]);
@@ -40,6 +40,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_copy_overlay(f, app, chunks[1]);
     }
 
+    draw_bottom_bar(f, app, chunks[2]);
+
     if matches!(app.mode, Mode::Help) {
         draw_help(f, area);
     }
@@ -51,6 +53,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if matches!(app.mode, Mode::TreeNav) {
         draw_tree_nav(f, app, area);
+    }
+    if matches!(app.mode, Mode::ProjectPicker | Mode::GroupPicker) {
+        draw_picker_dropdown(f, app, area);
     }
 }
 
@@ -258,6 +263,84 @@ fn draw_preset_picker(f: &mut Frame, app: &App, area: Rect) {
 
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
+}
+
+fn draw_picker_dropdown(f: &mut Frame, app: &App, area: Rect) {
+    let (items, color, title, active_id) = match app.mode {
+        Mode::ProjectPicker => (&app.projects, Color::Cyan, " Projects ", app.active_project),
+        Mode::GroupPicker => (&app.groups, Color::Green, " Groups ", app.active_group),
+        _ => return,
+    };
+    if items.is_empty() {
+        return;
+    }
+
+    let max_visible = 10usize;
+    let visible_count = items.len().min(max_visible);
+    let height = (visible_count as u16 + 2).min(area.height);
+    let width = items.iter().map(|e| e.name.len()).max().unwrap_or(10).max(12) as u16 + 4;
+    let width = width.min(area.width);
+
+    let x = (app.dropdown_x).min(area.width.saturating_sub(width));
+    let y = area.y + 1;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+        .title(title);
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let scroll_offset = if app.dropdown_selected >= max_visible {
+        app.dropdown_selected - max_visible + 1
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = items
+        .iter()
+        .skip(scroll_offset)
+        .take(max_visible)
+        .enumerate()
+        .map(|(i, entry)| {
+            let actual_idx = i + scroll_offset;
+            let is_selected = app.dropdown_selected == actual_idx;
+            let is_active = Some(entry.id) == active_id;
+            let style = if is_selected {
+                Style::default().fg(Color::Black).bg(color).bold()
+            } else if is_active {
+                Style::default().fg(color).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(format!(" {} ", entry.name), style))
+        })
+        .collect();
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
+}
+
+/// Compute the dropdown rect for hit-testing mouse clicks.
+pub fn picker_dropdown_rect(app: &App) -> Option<Rect> {
+    let items = match app.mode {
+        Mode::ProjectPicker => &app.projects,
+        Mode::GroupPicker => &app.groups,
+        _ => return None,
+    };
+    if items.is_empty() {
+        return None;
+    }
+    let max_visible = 10usize;
+    let visible_count = items.len().min(max_visible);
+    let height = visible_count as u16 + 2;
+    let width = items.iter().map(|e| e.name.len()).max().unwrap_or(10).max(12) as u16 + 4;
+    let (cols, _rows) = app.last_size;
+    let width = width.min(cols);
+    let x = app.dropdown_x.min(cols.saturating_sub(width));
+    Some(Rect::new(x, 1, width, height))
 }
 
 fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
@@ -507,6 +590,13 @@ fn compute_tile_rects(layout: TileLayout, windows: &[NodeId], area: Rect, weight
     }
 }
 
+fn draw_bottom_bar(f: &mut Frame, _app: &App, area: Rect) {
+    let line = Line::from(vec![
+        Span::styled(" zmux", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
 fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     // For text input modes, take over the full tab bar
     if matches!(app.mode, Mode::Rename) {
@@ -559,7 +649,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
 
     // Project
     let proj_name = app.projects.get(active_proj_idx).map(|e| e.name.as_str()).unwrap_or("?");
-    let proj_style = if nav && app.tab_focus == TabLevel::Project {
+    let proj_style = if matches!(app.mode, Mode::ProjectPicker) || (nav && app.tab_focus == TabLevel::Project) {
         Style::default().fg(Color::Black).bg(Color::Cyan).bold()
     } else {
         Style::default().fg(Color::Cyan)
@@ -569,7 +659,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
 
     // Group
     let grp_name = app.groups.get(active_grp_idx).map(|e| e.name.as_str()).unwrap_or("?");
-    let grp_style = if nav && app.tab_focus == TabLevel::Group {
+    let grp_style = if matches!(app.mode, Mode::GroupPicker) || (nav && app.tab_focus == TabLevel::Group) {
         Style::default().fg(Color::Black).bg(Color::Green).bold()
     } else {
         Style::default().fg(Color::Green)

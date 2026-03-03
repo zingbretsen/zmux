@@ -388,12 +388,20 @@ impl SessionTree {
     pub(crate) fn select_group(&mut self, id: NodeId) {
         self.active_group = Some(id);
         if let Some(Node::Group(g)) = self.nodes.get(&id) {
+            self.active_project = Some(g.parent);
             self.active_window = g.children.first().copied();
         } else { self.active_window = None; }
     }
 
     pub(crate) fn select_window(&mut self, id: NodeId) {
         self.active_window = Some(id);
+        if let Some(Node::Window(w)) = self.nodes.get(&id) {
+            let group_id = w.parent;
+            self.active_group = Some(group_id);
+            if let Some(Node::Group(g)) = self.nodes.get(&group_id) {
+                self.active_project = Some(g.parent);
+            }
+        }
     }
 
     pub(crate) fn active_window_mut(&mut self) -> Option<&mut WindowNode> {

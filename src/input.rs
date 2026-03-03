@@ -3,6 +3,8 @@ use crate::protocol::PaneDirection;
 use crate::ui;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, Borders};
 
 pub async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -26,6 +28,7 @@ pub async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             Ok(())
         }
         Mode::TreeNav => handle_tree_nav_key(app, key).await,
+        Mode::ProjectPicker | Mode::GroupPicker => handle_picker_key(app, key).await,
     }
 }
 
@@ -705,6 +708,15 @@ async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) ->
             }
         }
 
+        // c = send Ctrl-C (interrupt) to the window under cursor
+        KeyCode::Char('c') => {
+            if let Some(TreeItem::Window { id, .. }) = items.get(app.tree_cursor) {
+                app.conn.send_input_to_window(*id, vec![0x03]).await?;
+                // Refresh tree to update preview
+                app.conn.request_tree().await?;
+            }
+        }
+
         // Select item and navigate
         KeyCode::Enter => {
             if let Some(item) = items.get(app.tree_cursor) {
@@ -1105,21 +1117,109 @@ async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Res
     Ok(())
 }
 
+async fn handle_picker_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    let items_len = if matches!(app.mode, Mode::ProjectPicker) {
+        app.projects.len()
+    } else {
+        app.groups.len()
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Enter => {
+            if matches!(app.mode, Mode::ProjectPicker) {
+                if let Some(entry) = app.projects.get(app.dropdown_selected) {
+                    app.conn.select_project(entry.id).await?;
+                }
+            } else {
+                if let Some(entry) = app.groups.get(app.dropdown_selected) {
+                    app.conn.select_group(entry.id).await?;
+                }
+            }
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if items_len > 0 {
+                app.dropdown_selected = (app.dropdown_selected + 1).min(items_len - 1);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.dropdown_selected = app.dropdown_selected.saturating_sub(1);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -> Result<()> {
+    // Handle clicks when a picker dropdown is open
+    if matches!(app.mode, Mode::ProjectPicker | Mode::GroupPicker) {
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if let Some(rect) = ui::picker_dropdown_rect(app) {
+                // Click inside the dropdown — select the clicked item
+                if mouse.row >= rect.y + 1
+                    && mouse.row < rect.y + rect.height.saturating_sub(1)
+                    && mouse.column >= rect.x
+                    && mouse.column < rect.x + rect.width
+                {
+                    let max_visible = 10usize;
+                    let items = if matches!(app.mode, Mode::ProjectPicker) {
+                        &app.projects
+                    } else {
+                        &app.groups
+                    };
+                    let scroll_offset = if app.dropdown_selected >= max_visible {
+                        app.dropdown_selected - max_visible + 1
+                    } else {
+                        0
+                    };
+                    let item_idx = scroll_offset + (mouse.row - rect.y - 1) as usize;
+                    if let Some(entry) = items.get(item_idx) {
+                        if matches!(app.mode, Mode::ProjectPicker) {
+                            app.conn.select_project(entry.id).await?;
+                        } else {
+                            app.conn.select_group(entry.id).await?;
+                        }
+                    }
+                    app.mode = Mode::Normal;
+                    return Ok(());
+                }
+            }
+            // Click outside dropdown — dismiss and fall through to normal handling
+            app.mode = Mode::Normal;
+        }
+        // Non-click events while picker is open — ignore
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return Ok(());
+        }
+    }
+
     // Tab bar clicks work in any mode
     if mouse.row == 0 {
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             if let Some(click) = ui::tab_click_at(app, mouse.column) {
                 match click {
-                    ui::TabClick::Project(idx) => {
-                        if let Some(entry) = app.projects.get(idx) {
-                            app.conn.select_project(entry.id).await?;
-                        }
+                    ui::TabClick::Project(_) => {
+                        app.dropdown_x = 1; // project starts at column 1
+                        app.dropdown_selected = app.active_project
+                            .and_then(|id| app.projects.iter().position(|e| e.id == id))
+                            .unwrap_or(0);
+                        app.mode = Mode::ProjectPicker;
+                        return Ok(());
                     }
-                    ui::TabClick::Group(idx) => {
-                        if let Some(entry) = app.groups.get(idx) {
-                            app.conn.select_group(entry.id).await?;
-                        }
+                    ui::TabClick::Group(_) => {
+                        let proj_name = app.active_project
+                            .and_then(|id| app.projects.iter().find(|e| e.id == id))
+                            .map(|e| e.name.as_str())
+                            .unwrap_or("?");
+                        app.dropdown_x = (1 + proj_name.len() + 3) as u16;
+                        app.dropdown_selected = app.active_group
+                            .and_then(|id| app.groups.iter().position(|e| e.id == id))
+                            .unwrap_or(0);
+                        app.mode = Mode::GroupPicker;
+                        return Ok(());
                     }
                     ui::TabClick::Window(idx) => {
                         if let Some(entry) = app.windows.get(idx) {
@@ -1131,6 +1231,69 @@ pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -
             }
             return Ok(());
         }
+    }
+
+    // Tree nav mouse handling (before normal mode handling)
+    if matches!(app.mode, Mode::TreeNav) {
+        let items = app.tree_visible_items();
+        let count = items.len();
+        if count == 0 {
+            return Ok(());
+        }
+
+        // Recreate the tree area layout (must match draw_tree_nav in ui.rs)
+        let (cols, rows) = app.last_size;
+        let full_area = Rect::new(0, 0, cols, rows);
+        let halves = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(full_area);
+        let tree_area = halves[0];
+        let tree_block = Block::default().borders(Borders::ALL);
+        let tree_inner = tree_block.inner(tree_area);
+        let visible_height = tree_inner.height as usize;
+        let scroll_offset = if app.tree_cursor >= visible_height {
+            app.tree_cursor - visible_height + 1
+        } else {
+            0
+        };
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if mouse.column >= tree_inner.x
+                    && mouse.column < tree_inner.x + tree_inner.width
+                    && mouse.row >= tree_inner.y
+                    && mouse.row < tree_inner.y + tree_inner.height
+                {
+                    let row_in_tree = (mouse.row - tree_inner.y) as usize;
+                    let item_idx = scroll_offset + row_in_tree;
+                    if let Some(item) = items.get(item_idx) {
+                        match item {
+                            TreeItem::Project { id, .. } => {
+                                app.conn.select_project(*id).await?;
+                            }
+                            TreeItem::Group { id, .. } => {
+                                app.conn.select_group(*id).await?;
+                            }
+                            TreeItem::Window { id, .. } => {
+                                app.conn.select_window(*id).await?;
+                            }
+                        }
+                        app.tree_data.clear();
+                        app.tree_parsers.clear();
+                        app.mode = Mode::Normal;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                app.tree_cursor = app.tree_cursor.saturating_sub(3);
+            }
+            MouseEventKind::ScrollDown => {
+                app.tree_cursor = (app.tree_cursor + 3).min(count - 1);
+            }
+            _ => {}
+        }
+        return Ok(());
     }
 
     match app.mode {

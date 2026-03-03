@@ -8,7 +8,9 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 
 | Action | Effect |
 |--------|--------|
-| Click tab bar | Switch to clicked project/group/window |
+| Click project name | Open project picker dropdown |
+| Click group name | Open group picker dropdown |
+| Click window tab | Switch to clicked window |
 
 ### Normal Mode
 
@@ -72,8 +74,11 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `K` | Jump to previous item of same level |
 | `r` | Rename focused item |
 | `x` | Close/kill focused item (window, group, or project) |
+| `c` | Send Ctrl-C (interrupt) to the focused window |
 | `g` | Jump to top |
 | `G` | Jump to bottom |
+| Click item | Select item and jump to it |
+| Scroll wheel | Move cursor up/down |
 
 ### Copy Mode
 

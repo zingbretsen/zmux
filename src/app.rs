@@ -17,6 +17,8 @@ pub enum Mode {
     PresetInput,
     Help,
     TreeNav,
+    ProjectPicker,
+    GroupPicker,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -85,6 +87,10 @@ pub struct App {
     pub preset_candidates: Vec<String>,
     pub preset_selected: Option<usize>,
 
+    // Project/group picker dropdown state
+    pub dropdown_selected: usize,
+    pub dropdown_x: u16,
+
     // Tree nav state
     pub tree_data: Vec<TreeProject>,
     pub tree_cursor: usize,
@@ -100,7 +106,7 @@ pub struct App {
 impl App {
     pub async fn new(conn: ClientConnection, rows: u16, cols: u16) -> Result<Self> {
         conn.send_resize(cols, rows).await?;
-        let term_rows = rows.saturating_sub(1);
+        let term_rows = rows.saturating_sub(2);
         Ok(App {
             conn,
             should_quit: false,
@@ -135,6 +141,8 @@ impl App {
             branch_selected: None,
             preset_candidates: Vec::new(),
             preset_selected: None,
+            dropdown_selected: 0,
+            dropdown_x: 0,
             tree_data: Vec::new(),
             tree_cursor: 0,
             tree_collapsed_projects: HashSet::new(),
@@ -234,7 +242,7 @@ impl App {
     pub async fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         if self.last_size != (cols, rows) {
             self.last_size = (cols, rows);
-            self.term_rows = rows.saturating_sub(1);
+            self.term_rows = rows.saturating_sub(2);
             self.term_cols = cols;
             // Resize all existing parsers
             for parser in self.parsers.values() {
