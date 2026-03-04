@@ -70,11 +70,27 @@ async fn handle_normal_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
 }
 
 async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
     match key.code {
         KeyCode::Esc | KeyCode::Enter => app.mode = Mode::Normal,
 
         KeyCode::Char('d') => {
             app.should_detach = true;
+        }
+
+        // Pane focus navigation in tiled mode (Ctrl+h/j/k/l)
+        KeyCode::Char('h') if ctrl && app.is_tiled() => {
+            app.conn.focus_pane(PaneDirection::Left).await?;
+        }
+        KeyCode::Char('j') if ctrl && app.is_tiled() => {
+            app.conn.focus_pane(PaneDirection::Down).await?;
+        }
+        KeyCode::Char('k') if ctrl && app.is_tiled() => {
+            app.conn.focus_pane(PaneDirection::Up).await?;
+        }
+        KeyCode::Char('l') if ctrl && app.is_tiled() => {
+            app.conn.focus_pane(PaneDirection::Right).await?;
         }
 
         // Resize active pane in tiled mode (Shift+Arrow)

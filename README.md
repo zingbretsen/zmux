@@ -55,6 +55,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `m` | Close active pane (unsplit; window stays alive) |
 | `n` / `N` | Cycle pane content to next/previous window in group |
 | `o` / `O` | Cycle pane content globally (across all groups/projects) |
+| `Ctrl+H/J/K/L` | Move focus between panes (tiled mode only) |
 | `Shift+Arrow` | Resize active pane |
 | `u` | Hot reload server binary (upgrade in place) |
 | `f` | Open session tree navigator (with preview) |
