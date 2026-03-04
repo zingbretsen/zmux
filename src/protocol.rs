@@ -9,29 +9,171 @@ pub enum LayoutMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TileLayout {
-    EqualColumns,
-    EqualRows,
-    MainLeft,
-    Grid,
+pub enum SplitDir {
+    /// First on top, second on bottom
+    Horizontal,
+    /// First on left, second on right
+    Vertical,
 }
 
-impl TileLayout {
-    pub fn next(self) -> Self {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SplitTree {
+    Leaf {
+        pane_id: u32,
+        window_id: NodeId,
+    },
+    Split {
+        direction: SplitDir,
+        /// Fraction (0.0–1.0) of space allocated to the first child
+        ratio: f64,
+        first: Box<SplitTree>,
+        second: Box<SplitTree>,
+    },
+}
+
+impl SplitTree {
+    /// Collect all leaf (pane_id, window_id) pairs
+    pub fn leaves(&self) -> Vec<(u32, NodeId)> {
         match self {
-            TileLayout::EqualColumns => TileLayout::EqualRows,
-            TileLayout::EqualRows => TileLayout::MainLeft,
-            TileLayout::MainLeft => TileLayout::Grid,
-            TileLayout::Grid => TileLayout::EqualColumns,
+            SplitTree::Leaf { pane_id, window_id } => vec![(*pane_id, *window_id)],
+            SplitTree::Split { first, second, .. } => {
+                let mut v = first.leaves();
+                v.extend(second.leaves());
+                v
+            }
         }
     }
 
-    pub fn name(self) -> &'static str {
+    /// Collect all window IDs present in the tree
+    pub fn window_ids(&self) -> Vec<NodeId> {
+        self.leaves().into_iter().map(|(_, wid)| wid).collect()
+    }
+
+    /// Find the window_id for a given pane_id
+    pub fn window_for_pane(&self, target: u32) -> Option<NodeId> {
         match self {
-            TileLayout::EqualColumns => "columns",
-            TileLayout::EqualRows => "rows",
-            TileLayout::MainLeft => "main-left",
-            TileLayout::Grid => "grid",
+            SplitTree::Leaf { pane_id, window_id } => {
+                if *pane_id == target { Some(*window_id) } else { None }
+            }
+            SplitTree::Split { first, second, .. } => {
+                first.window_for_pane(target).or_else(|| second.window_for_pane(target))
+            }
+        }
+    }
+
+    /// Remove a leaf by pane_id. Returns the modified tree (or None if the whole tree was that leaf).
+    pub fn remove_leaf(self, target: u32) -> Option<SplitTree> {
+        match self {
+            SplitTree::Leaf { pane_id, window_id } => {
+                if pane_id == target { None } else { Some(SplitTree::Leaf { pane_id, window_id }) }
+            }
+            SplitTree::Split { direction, ratio, first, second } => {
+                let first_has = first.leaves().iter().any(|(pid, _)| *pid == target);
+                let second_has = second.leaves().iter().any(|(pid, _)| *pid == target);
+                if first_has {
+                    match first.remove_leaf(target) {
+                        Some(new_first) => Some(SplitTree::Split { direction, ratio, first: Box::new(new_first), second }),
+                        None => Some(*second), // first was the target leaf, sibling takes over
+                    }
+                } else if second_has {
+                    match second.remove_leaf(target) {
+                        Some(new_second) => Some(SplitTree::Split { direction, ratio, first, second: Box::new(new_second) }),
+                        None => Some(*first), // second was the target leaf, sibling takes over
+                    }
+                } else {
+                    Some(SplitTree::Split { direction, ratio, first, second })
+                }
+            }
+        }
+    }
+
+    /// Set the window_id for a given pane_id
+    pub fn set_pane_window(&mut self, target: u32, new_window: NodeId) {
+        match self {
+            SplitTree::Leaf { pane_id, window_id } => {
+                if *pane_id == target {
+                    *window_id = new_window;
+                }
+            }
+            SplitTree::Split { first, second, .. } => {
+                first.set_pane_window(target, new_window);
+                second.set_pane_window(target, new_window);
+            }
+        }
+    }
+
+    /// Swap the split direction at the parent of the given pane_id.
+    /// Returns true if a swap was made.
+    pub fn swap_direction_at(&mut self, target: u32) -> bool {
+        match self {
+            SplitTree::Leaf { .. } => false,
+            SplitTree::Split { direction, first, second, .. } => {
+                let in_first = first.leaves().iter().any(|(pid, _)| *pid == target);
+                let in_second = second.leaves().iter().any(|(pid, _)| *pid == target);
+                if in_first || in_second {
+                    // Check if target is a direct child
+                    let direct_child = matches!(first.as_ref(), SplitTree::Leaf { pane_id, .. } if *pane_id == target)
+                        || matches!(second.as_ref(), SplitTree::Leaf { pane_id, .. } if *pane_id == target);
+                    if direct_child {
+                        *direction = match *direction {
+                            SplitDir::Horizontal => SplitDir::Vertical,
+                            SplitDir::Vertical => SplitDir::Horizontal,
+                        };
+                        return true;
+                    }
+                    // Recurse into the child that contains the target
+                    if in_first { first.swap_direction_at(target) }
+                    else { second.swap_direction_at(target) }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Adjust the ratio at the parent split of the given pane_id.
+    /// delta is added to ratio (positive = more space for first child).
+    pub fn adjust_ratio_at(&mut self, target: u32, delta: f64) -> bool {
+        match self {
+            SplitTree::Leaf { .. } => false,
+            SplitTree::Split { ratio, first, second, .. } => {
+                let in_first = first.leaves().iter().any(|(pid, _)| *pid == target);
+                let in_second = second.leaves().iter().any(|(pid, _)| *pid == target);
+                if in_first || in_second {
+                    let direct_child = matches!(first.as_ref(), SplitTree::Leaf { pane_id, .. } if *pane_id == target)
+                        || matches!(second.as_ref(), SplitTree::Leaf { pane_id, .. } if *pane_id == target);
+                    if direct_child {
+                        // Determine sign: if target is in first child, delta as-is; if in second, negate
+                        let effective_delta = if in_first { delta } else { -delta };
+                        *ratio = (*ratio + effective_delta).clamp(0.1, 0.9);
+                        return true;
+                    }
+                    if in_first { first.adjust_ratio_at(target, delta) }
+                    else { second.adjust_ratio_at(target, delta) }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Remove all leaves that reference the given window_id.
+    /// Returns None if the entire tree is removed.
+    pub fn remove_window(self, window_id: NodeId) -> Option<SplitTree> {
+        match self {
+            SplitTree::Leaf { window_id: wid, .. } => {
+                if wid == window_id { None } else { Some(self) }
+            }
+            SplitTree::Split { direction, ratio, first, second } => {
+                let new_first = first.remove_window(window_id);
+                let new_second = second.remove_window(window_id);
+                match (new_first, new_second) {
+                    (Some(f), Some(s)) => Some(SplitTree::Split { direction, ratio, first: Box::new(f), second: Box::new(s) }),
+                    (Some(f), None) => Some(f),
+                    (None, Some(s)) => Some(s),
+                    (None, None) => None,
+                }
+            }
         }
     }
 }
@@ -39,28 +181,6 @@ impl TileLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tile_layout_cycles_through_all_variants() {
-        let start = TileLayout::EqualColumns;
-        let second = start.next();
-        let third = second.next();
-        let fourth = third.next();
-        let back = fourth.next();
-
-        assert_eq!(second, TileLayout::EqualRows);
-        assert_eq!(third, TileLayout::MainLeft);
-        assert_eq!(fourth, TileLayout::Grid);
-        assert_eq!(back, TileLayout::EqualColumns);
-    }
-
-    #[test]
-    fn tile_layout_names() {
-        assert_eq!(TileLayout::EqualColumns.name(), "columns");
-        assert_eq!(TileLayout::EqualRows.name(), "rows");
-        assert_eq!(TileLayout::MainLeft.name(), "main-left");
-        assert_eq!(TileLayout::Grid.name(), "grid");
-    }
 
     #[test]
     fn client_msg_roundtrip() {
@@ -75,6 +195,12 @@ mod tests {
 
     #[test]
     fn server_msg_tab_state_roundtrip() {
+        let tree = SplitTree::Split {
+            direction: SplitDir::Vertical,
+            ratio: 0.5,
+            first: Box::new(SplitTree::Leaf { pane_id: 0, window_id: 2 }),
+            second: Box::new(SplitTree::Leaf { pane_id: 1, window_id: 3 }),
+        };
         let msg = ServerMsg::TabState {
             projects: vec![TabEntry { id: 1, name: "proj".into(), ai_status: None }],
             groups: vec![],
@@ -83,21 +209,20 @@ mod tests {
             active_group: None,
             active_window: None,
             layout_mode: LayoutMode::Tiled,
-            tile_layout: TileLayout::Grid,
-            tiled_windows: vec![2, 3],
-            pane_weights: vec![(2, 1.0, 0.5)],
+            split_tree: Some(tree),
+            active_pane: Some(0),
         };
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded: ServerMsg = serde_json::from_slice(&json).unwrap();
         match decoded {
-            ServerMsg::TabState { projects, active_project, layout_mode, tile_layout, tiled_windows, pane_weights, .. } => {
+            ServerMsg::TabState { projects, active_project, layout_mode, split_tree, active_pane, .. } => {
                 assert_eq!(projects.len(), 1);
                 assert_eq!(projects[0].name, "proj");
                 assert_eq!(active_project, Some(1));
                 assert_eq!(layout_mode, LayoutMode::Tiled);
-                assert_eq!(tile_layout, TileLayout::Grid);
-                assert_eq!(tiled_windows, vec![2, 3]);
-                assert_eq!(pane_weights, vec![(2, 1.0, 0.5)]);
+                assert!(split_tree.is_some());
+                assert_eq!(split_tree.unwrap().leaves().len(), 2);
+                assert_eq!(active_pane, Some(0));
             }
             _ => panic!("wrong variant"),
         }
@@ -127,7 +252,6 @@ mod tests {
     fn read_msg_rejects_oversized() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
-            // Craft a message claiming to be 20MB
             let len = (20 * 1024 * 1024u32).to_be_bytes();
             let mut buf = Vec::new();
             buf.extend_from_slice(&len);
@@ -137,6 +261,32 @@ mod tests {
             let result: anyhow::Result<Option<ClientMsg>> = read_msg(&mut cursor).await;
             assert!(result.is_err());
         });
+    }
+
+    #[test]
+    fn split_tree_leaves() {
+        let tree = SplitTree::Split {
+            direction: SplitDir::Vertical,
+            ratio: 0.5,
+            first: Box::new(SplitTree::Leaf { pane_id: 0, window_id: 10 }),
+            second: Box::new(SplitTree::Leaf { pane_id: 1, window_id: 20 }),
+        };
+        let leaves = tree.leaves();
+        assert_eq!(leaves, vec![(0, 10), (1, 20)]);
+    }
+
+    #[test]
+    fn split_tree_remove_leaf() {
+        let tree = SplitTree::Split {
+            direction: SplitDir::Vertical,
+            ratio: 0.5,
+            first: Box::new(SplitTree::Leaf { pane_id: 0, window_id: 10 }),
+            second: Box::new(SplitTree::Leaf { pane_id: 1, window_id: 20 }),
+        };
+        let result = tree.remove_leaf(0);
+        assert!(result.is_some());
+        let remaining = result.unwrap();
+        assert_eq!(remaining.leaves(), vec![(1, 20)]);
     }
 }
 
@@ -176,7 +326,7 @@ pub enum ClientMsg {
     /// Save active window's cwd as the group's default directory
     SetGroupDir,
     /// Save current session tree as a preset
-    SavePreset { name: Option<String> },
+    SavePreset { name: Option<String>, force: bool },
     /// Cycle to the next window with an AI session (across all projects/groups)
     NextAiWindow,
     /// Cycle to the previous window with an AI session
@@ -205,18 +355,22 @@ pub enum ClientMsg {
     SearchWindows { query: String },
     /// Toggle group layout mode (Stacked ↔ Tiled)
     ToggleLayout,
-    /// Cycle tile layout algorithm
-    CycleLayout,
-    /// Toggle a window in/out of the tile set
-    ToggleTile { id: NodeId },
+    /// Split the active pane horizontally or vertically
+    SplitPane { direction: SplitDir },
+    /// Close the active pane (unsplit); sibling takes parent's place
+    CloseSplit,
+    /// Swap the split direction (H↔V) at the active pane's parent
+    SwapSplitDirection,
     /// Move focus between panes in tiled mode
     FocusPane { direction: PaneDirection },
     /// Send input to a specific window (used in tiled mode)
     InputToWindow { window_id: NodeId, data: Vec<u8> },
     /// Resize the active pane in tiled mode
     ResizePane { direction: PaneDirection },
-    /// Cycle the focused pane's content to the next/prev untiled window
+    /// Cycle the focused pane's content to the next/prev window in group
     CyclePaneContent { forward: bool },
+    /// Cycle the focused pane's content to the next/prev window across all groups/projects
+    CyclePaneContentGlobal { forward: bool },
     /// Close a specific node by ID (window, group, or project)
     CloseNode { id: NodeId },
     /// Request full session tree (for tree nav)
@@ -243,9 +397,8 @@ pub enum ServerMsg {
         active_group: Option<NodeId>,
         active_window: Option<NodeId>,
         layout_mode: LayoutMode,
-        tile_layout: TileLayout,
-        tiled_windows: Vec<NodeId>,
-        pane_weights: Vec<(NodeId, f64, f64)>,
+        split_tree: Option<SplitTree>,
+        active_pane: Option<u32>,
     },
     /// Error
     Error { message: String },
@@ -257,6 +410,8 @@ pub enum ServerMsg {
     BranchList { branches: Vec<String> },
     /// List of available presets
     PresetList { presets: Vec<String> },
+    /// Preset already exists; client should confirm overwrite
+    ConfirmOverwrite { name: String },
     /// Server is about to exec() for hot reload; clients should reconnect
     Reloading,
     /// Full session tree (for tree nav)

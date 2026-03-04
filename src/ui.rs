@@ -1,8 +1,7 @@
 use crate::app::{App, Mode, TabLevel, TreeItem};
-use crate::protocol::{LayoutMode, NodeId, TileLayout};
+use crate::protocol::{LayoutMode, SplitDir, SplitTree};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use std::collections::HashMap;
 use std::time::Duration;
 use tui_term::widget::PseudoTerminal;
 
@@ -62,6 +61,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if matches!(app.mode, Mode::ProjectPicker | Mode::GroupPicker) {
         draw_picker_dropdown(f, app, area);
+    }
+    if matches!(app.mode, Mode::ConfirmOverwrite) {
+        draw_confirm_overwrite(f, app, area);
     }
 }
 
@@ -126,8 +128,10 @@ fn draw_help(f: &mut Frame, area: Rect) {
  W       Save preset        L       Load preset
  w       New worktree group X       Close group
  R       Rebase onto main   M       Merge into main
- t       Toggle tiled       T       Cycle tile layout
- m       Toggle window tile n/N     Cycle pane content
+ t       Toggle tiled       v       Vertical split
+ -       Horizontal split   T       Swap split direction
+ m       Close pane         n/N     Cycle pane (group)
+ o/O     Cycle pane (all)
  f       Session tree       d       Detach
 
  Tree Nav: j/k move, h fold, l expand, Enter select
@@ -269,6 +273,32 @@ fn draw_preset_picker(f: &mut Frame, app: &App, area: Rect) {
 
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
+}
+
+fn draw_confirm_overwrite(f: &mut Frame, app: &App, area: Rect) {
+    let name = match &app.overwrite_preset_name {
+        Some(n) => n.as_str(),
+        None => return,
+    };
+    let prompt = format!(" Overwrite preset '{}'? (y/n) ", name);
+    let width = (prompt.len() as u16 + 4).min(area.width);
+    let height = 3u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let text = Paragraph::new(Line::from(Span::styled(
+        prompt,
+        Style::default().fg(Color::Yellow).bold(),
+    )));
+    f.render_widget(text, inner);
 }
 
 fn draw_picker_dropdown(f: &mut Frame, app: &App, area: Rect) {
@@ -458,140 +488,66 @@ fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_tiled(f: &mut Frame, app: &App, area: Rect) {
-    let windows = &app.tiled_windows;
-    let n = windows.len();
-    if n == 0 {
-        return;
-    }
-
-    let rects = compute_tile_rects(app.tile_layout, windows, area, &app.pane_weights);
-
-    for (i, &wid) in windows.iter().enumerate() {
-        if i >= rects.len() {
-            break;
-        }
-        let rect = rects[i];
-        let is_active = app.active_window == Some(wid);
-
-        // Find window name
-        let name = app.windows.iter()
-            .find(|e| e.id == wid)
-            .map(|e| e.name.as_str())
-            .unwrap_or("?");
-
-        let border_style = if is_active {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(Span::styled(
-                format!(" {} ", name),
-                if is_active {
-                    Style::default().fg(Color::Yellow).bold()
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                },
-            ));
-
-        let inner = block.inner(rect);
-        f.render_widget(block, rect);
-
-        if let Some(parser) = app.parser_for(wid) {
-            let parser = parser.lock().unwrap();
-            let pseudo_term = PseudoTerminal::new(parser.screen());
-            f.render_widget(pseudo_term, inner);
-        }
+    if let Some(ref tree) = app.split_tree {
+        draw_split_node(f, app, tree, area);
     }
 }
 
-/// Compute rects for each tiled pane within the given area, using per-pane weights.
-fn compute_tile_rects(layout: TileLayout, windows: &[NodeId], area: Rect, weights: &HashMap<NodeId, (f64, f64)>) -> Vec<Rect> {
-    let n = windows.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    if n == 1 {
-        return vec![area];
-    }
+/// Recursively render a split tree node
+fn draw_split_node(f: &mut Frame, app: &App, tree: &SplitTree, area: Rect) {
+    match tree {
+        SplitTree::Leaf { pane_id, window_id } => {
+            let is_active = app.active_pane == Some(*pane_id);
 
-    // Convert float weights to integer ratios for Constraint::Ratio
-    // Multiply by 100 and round to get integer proportions
-    let w_ratios: Vec<u32> = windows.iter()
-        .map(|&id| (weights.get(&id).map_or(1.0, |&(w, _)| w) * 100.0).round() as u32)
-        .collect();
-    let h_ratios: Vec<u32> = windows.iter()
-        .map(|&id| (weights.get(&id).map_or(1.0, |&(_, h)| h) * 100.0).round() as u32)
-        .collect();
+            let name = app.windows.iter()
+                .find(|e| e.id == *window_id)
+                .map(|e| e.name.as_str())
+                .unwrap_or("?");
 
-    match layout {
-        TileLayout::EqualColumns => {
-            let total: u32 = w_ratios.iter().sum();
-            let constraints: Vec<Constraint> = w_ratios.iter()
-                .map(|&r| Constraint::Ratio(r, total))
-                .collect();
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(constraints)
-                .split(area)
-                .to_vec()
-        }
-        TileLayout::EqualRows => {
-            let total: u32 = h_ratios.iter().sum();
-            let constraints: Vec<Constraint> = h_ratios.iter()
-                .map(|&r| Constraint::Ratio(r, total))
-                .collect();
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .split(area)
-                .to_vec()
-        }
-        TileLayout::MainLeft => {
-            let main_w = w_ratios[0];
-            // Average the side pane widths for the horizontal split
-            let side_avg: u32 = if n > 1 { w_ratios[1..].iter().sum::<u32>() / (n - 1) as u32 } else { 100 };
-            let total_w = main_w + side_avg;
-            let horiz = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Ratio(main_w, total_w), Constraint::Ratio(side_avg, total_w)])
-                .split(area);
-            let mut rects = vec![horiz[0]];
-            let side_count = n - 1;
-            let side_h_ratios: Vec<u32> = h_ratios[1..].to_vec();
-            let side_total: u32 = side_h_ratios.iter().sum();
-            let constraints: Vec<Constraint> = side_h_ratios.iter()
-                .map(|&r| Constraint::Ratio(r, side_total))
-                .collect();
-            let side_rects = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .split(horiz[1]);
-            rects.extend(side_rects.iter().take(side_count));
-            rects
-        }
-        TileLayout::Grid => {
-            let cols = (n as f64).sqrt().ceil() as usize;
-            let rows = (n + cols - 1) / cols;
-            let row_rects = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(vec![Constraint::Ratio(1, rows as u32); rows])
-                .split(area);
-            let mut rects = Vec::new();
-            let mut idx = 0;
-            for row_rect in row_rects.iter() {
-                let in_this_row = cols.min(n - idx);
-                let col_rects = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints(vec![Constraint::Ratio(1, in_this_row as u32); in_this_row])
-                    .split(*row_rect);
-                rects.extend(col_rects.iter());
-                idx += in_this_row;
+            let border_style = if is_active {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(Span::styled(
+                    format!(" {} ", name),
+                    if is_active {
+                        Style::default().fg(Color::Yellow).bold()
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ));
+
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            if let Some(parser) = app.parser_for(*window_id) {
+                let parser = parser.lock().unwrap();
+                let pseudo_term = PseudoTerminal::new(parser.screen());
+                f.render_widget(pseudo_term, inner);
             }
-            rects
+        }
+        SplitTree::Split { direction, ratio, first, second } => {
+            let ratio_u32 = (ratio * 1000.0).round() as u32;
+            let remainder = 1000u32.saturating_sub(ratio_u32);
+
+            let chunks = Layout::default()
+                .direction(match direction {
+                    SplitDir::Vertical => Direction::Horizontal,
+                    SplitDir::Horizontal => Direction::Vertical,
+                })
+                .constraints([
+                    Constraint::Ratio(ratio_u32, 1000),
+                    Constraint::Ratio(remainder, 1000),
+                ])
+                .split(area);
+
+            draw_split_node(f, app, first, chunks[0]);
+            draw_split_node(f, app, second, chunks[1]);
         }
     }
 }
@@ -669,7 +625,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     match app.layout_mode {
         LayoutMode::Tiled => {
             spans.push(Span::styled(
-                format!(" [{}]", app.tile_layout.name()),
+                " [tiled]",
                 Style::default().fg(Color::Magenta).bold(),
             ));
         }
@@ -685,8 +641,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
 
     // Calculate the character width of each window tab (including separator)
     let tab_widths: Vec<usize> = app.windows.iter().enumerate().map(|(i, entry)| {
-        let tile_prefix = if app.tiled_windows.contains(&entry.id) { 1 } else { 0 }; // "*"
-        entry.name.len() + tile_prefix + if i > 0 { 3 } else { 0 } // " | " separator
+        entry.name.len() + if i > 0 { 3 } else { 0 } // " | " separator
     }).collect();
 
     // Find the range of tabs to display, ensuring active tab is visible
@@ -699,7 +654,6 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         if i > start {
             spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
         }
-        let is_tiled = app.tiled_windows.contains(&app.windows[i].id);
         let style = if i == active_win_idx {
             if nav && app.tab_focus == TabLevel::Window {
                 Style::default().fg(Color::Black).bg(Color::Yellow).bold()
@@ -709,9 +663,6 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(Color::White)
         };
-        if is_tiled {
-            spans.push(Span::styled("*", Style::default().fg(Color::Magenta)));
-        }
         spans.push(Span::styled(app.windows[i].name.clone(), style));
         // AI status indicator
         if let Some(ref ai) = app.windows[i].ai_status {
@@ -798,7 +749,7 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
 
     // Layout indicator — attribute to group
     if app.layout_mode == LayoutMode::Tiled {
-        let layout_span = 2 + app.tile_layout.name().len() + 1; // " [name]"
+        let layout_span = 8; // " [tiled]"
         if col < x + layout_span {
             return Some(TabClick::Group);
         }
@@ -818,8 +769,7 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
     let avail_width = (app.last_size.0 as usize).saturating_sub(prefix_width + suffix_width + 2); // +2 for border
 
     let tab_widths: Vec<usize> = app.windows.iter().enumerate().map(|(i, entry)| {
-        let tile_prefix = if app.tiled_windows.contains(&entry.id) { 1 } else { 0 };
-        entry.name.len() + tile_prefix + if i > 0 { 3 } else { 0 }
+        entry.name.len() + if i > 0 { 3 } else { 0 }
     }).collect();
 
     let (start, end) = visible_tab_range(&tab_widths, active_win_idx, avail_width);
@@ -845,13 +795,12 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
             }
             x += 3;
         }
-        let tile_len = if app.tiled_windows.contains(&app.windows[i].id) { 1 } else { 0 };
         let name_len = app.windows[i].name.len();
         let ai_len = if app.windows[i].ai_status.is_some() { 1 } else { 0 };
-        if col >= x && col < x + tile_len + name_len + ai_len {
+        if col >= x && col < x + name_len + ai_len {
             return Some(TabClick::Window(i));
         }
-        x += tile_len + name_len + ai_len;
+        x += name_len + ai_len;
         last_window_idx = i;
     }
 

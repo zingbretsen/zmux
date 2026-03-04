@@ -39,7 +39,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `a` | Enter AI nav mode |
 | `s` | Save current cwd as group directory |
 | `S` | Save current cwd as project directory |
-| `W` | Save session as preset |
+| `W` | Save session as preset (prompts y/n before overwriting existing) |
 | `L` | Load preset into current session (type to filter, ↑/↓ to select, Tab to autocomplete) |
 | `w` | Create new worktree group (type a name or pick from branch list with ↑/↓, Tab to autocomplete) |
 | `X` | Close active group (removes worktree if applicable) |
@@ -49,10 +49,13 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `[` | Enter copy (scroll) mode |
 | `]` | Paste from copy buffer |
 | `t` | Toggle layout mode (Stacked ↔ Tiled) |
-| `T` | Cycle tile layout (columns → rows → main-left → grid) |
-| `m` | Toggle current window in/out of tile set |
-| `n` / `N` | Cycle focused pane content to next/previous untiled window |
-| `Shift+Arrow` | Resize active pane (Left/Right=width, Up/Down=height) |
+| `v` | Split active pane vertically (side by side) |
+| `-` | Split active pane horizontally (top/bottom) |
+| `T` | Swap split direction (H↔V) at active pane |
+| `m` | Close active pane (unsplit; window stays alive) |
+| `n` / `N` | Cycle pane content to next/previous window in group |
+| `o` / `O` | Cycle pane content globally (across all groups/projects) |
+| `Shift+Arrow` | Resize active pane |
 | `u` | Hot reload server binary (upgrade in place) |
 | `f` | Open session tree navigator (with preview) |
 | `?` | Show help overlay |
@@ -160,7 +163,7 @@ name = "shell"
 - **Hierarchical sessions**: Projects > Groups > Windows
 - **AI awareness**: Detects claude, codex, aider, copilot processes and shows status indicators
 - **Git worktree integration**: Create groups backed by git worktrees, rebase/merge from within zmux
-- **Tiling layouts**: i3-style tiled mode with columns, rows, main-left, and grid layouts
+- **Vim-style splits**: Binary split tree for tiling — split any pane horizontally or vertically, resize with ratios
 - **Presets**: Save and restore session trees as TOML
 - **.env support**: Auto-injects `.env` variables into new windows based on project/group directory
 - **Client-server architecture**: Sessions persist across disconnects

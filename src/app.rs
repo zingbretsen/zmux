@@ -1,5 +1,5 @@
 use crate::client::ClientConnection;
-use crate::protocol::{LayoutMode, NodeId, ServerMsg, TabEntry, TileLayout, TreeProject};
+use crate::protocol::{LayoutMode, NodeId, ServerMsg, SplitTree, TabEntry, TreeProject};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,7 @@ pub enum Mode {
     TreeNav,
     ProjectPicker,
     GroupPicker,
+    ConfirmOverwrite,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -54,9 +55,8 @@ pub struct App {
 
     // Layout state
     pub layout_mode: LayoutMode,
-    pub tile_layout: TileLayout,
-    pub tiled_windows: Vec<NodeId>,
-    pub pane_weights: HashMap<NodeId, (f64, f64)>,
+    pub split_tree: Option<SplitTree>,
+    pub active_pane: Option<u32>,
 
     // Client-side vt100 parsers keyed by window ID
     pub parsers: HashMap<NodeId, Arc<Mutex<vt100::Parser>>>,
@@ -102,6 +102,9 @@ pub struct App {
     pub tree_active_window: Option<NodeId>,
     /// Parsers for tree nav preview (separate from main parsers)
     pub tree_parsers: HashMap<NodeId, Arc<Mutex<vt100::Parser>>>,
+
+    // Overwrite confirmation state
+    pub overwrite_preset_name: Option<String>,
 }
 
 impl App {
@@ -124,9 +127,8 @@ impl App {
             active_group: None,
             active_window: None,
             layout_mode: LayoutMode::Stacked,
-            tile_layout: TileLayout::EqualColumns,
-            tiled_windows: Vec::new(),
-            pane_weights: HashMap::new(),
+            split_tree: None,
+            active_pane: None,
             parsers: HashMap::new(),
             term_rows,
             term_cols,
@@ -154,6 +156,7 @@ impl App {
             tree_active_group: None,
             tree_active_window: None,
             tree_parsers: HashMap::new(),
+            overwrite_preset_name: None,
         })
     }
 
@@ -171,7 +174,7 @@ impl App {
 
     pub fn apply_server_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::TabState { projects, groups, windows, active_project, active_group, active_window, layout_mode, tile_layout, tiled_windows, pane_weights } => {
+            ServerMsg::TabState { projects, groups, windows, active_project, active_group, active_window, layout_mode, split_tree, active_pane } => {
                 self.projects = projects;
                 self.groups = groups;
                 self.windows = windows;
@@ -179,9 +182,8 @@ impl App {
                 self.active_group = active_group;
                 self.active_window = active_window;
                 self.layout_mode = layout_mode;
-                self.tile_layout = tile_layout;
-                self.tiled_windows = tiled_windows;
-                self.pane_weights = pane_weights.into_iter().map(|(id, w, h)| (id, (w, h))).collect();
+                self.split_tree = split_tree;
+                self.active_pane = active_pane;
 
                 // Clean up parsers for windows that no longer exist
                 let window_ids: HashSet<NodeId> = self.windows.iter().map(|e| e.id).collect();
@@ -211,6 +213,10 @@ impl App {
             ServerMsg::WindowCreated { .. } => {}
             ServerMsg::Error { message } => {
                 self.status_message = Some((format!("Error: {}", message), Instant::now()));
+            }
+            ServerMsg::ConfirmOverwrite { name } => {
+                self.overwrite_preset_name = Some(name);
+                self.mode = Mode::ConfirmOverwrite;
             }
             ServerMsg::Reloading => {
                 self.status_message = Some(("Server reloading...".to_string(), Instant::now()));
@@ -260,7 +266,7 @@ impl App {
     }
 
     pub fn is_tiled(&self) -> bool {
-        self.layout_mode == LayoutMode::Tiled && !self.tiled_windows.is_empty()
+        self.layout_mode == LayoutMode::Tiled && self.split_tree.is_some()
     }
 
     // Tab navigation helpers

@@ -1,4 +1,4 @@
-use crate::protocol::{self, ClientMsg, NodeId, PaneDirection, ServerMsg};
+use crate::protocol::{self, ClientMsg, NodeId, PaneDirection, ServerMsg, SplitDir};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::io::BufReader;
@@ -77,8 +77,8 @@ impl ClientConnection {
         self.send(ClientMsg::SetGroupDir).await
     }
 
-    pub async fn save_preset(&self, name: Option<String>) -> Result<()> {
-        self.send(ClientMsg::SavePreset { name }).await
+    pub async fn save_preset(&self, name: Option<String>, force: bool) -> Result<()> {
+        self.send(ClientMsg::SavePreset { name, force }).await
     }
 
     pub async fn next_ai_window(&self) -> Result<()> {
@@ -145,12 +145,16 @@ impl ClientConnection {
         self.send(ClientMsg::ToggleLayout).await
     }
 
-    pub async fn cycle_layout(&self) -> Result<()> {
-        self.send(ClientMsg::CycleLayout).await
+    pub async fn split_pane(&self, direction: SplitDir) -> Result<()> {
+        self.send(ClientMsg::SplitPane { direction }).await
     }
 
-    pub async fn toggle_tile(&self, id: NodeId) -> Result<()> {
-        self.send(ClientMsg::ToggleTile { id }).await
+    pub async fn close_split(&self) -> Result<()> {
+        self.send(ClientMsg::CloseSplit).await
+    }
+
+    pub async fn swap_split_direction(&self) -> Result<()> {
+        self.send(ClientMsg::SwapSplitDirection).await
     }
 
     pub async fn focus_pane(&self, direction: PaneDirection) -> Result<()> {
@@ -163,6 +167,10 @@ impl ClientConnection {
 
     pub async fn cycle_pane_content(&self, forward: bool) -> Result<()> {
         self.send(ClientMsg::CyclePaneContent { forward }).await
+    }
+
+    pub async fn cycle_pane_content_global(&self, forward: bool) -> Result<()> {
+        self.send(ClientMsg::CyclePaneContentGlobal { forward }).await
     }
 
     pub async fn send_input_to_window(&self, window_id: NodeId, data: Vec<u8>) -> Result<()> {

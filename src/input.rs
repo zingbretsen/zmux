@@ -1,5 +1,5 @@
 use crate::app::{App, Mode, TabLevel, TreeItem};
-use crate::protocol::PaneDirection;
+use crate::protocol::{PaneDirection, SplitDir};
 use crate::ui;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -29,6 +29,7 @@ pub async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         }
         Mode::TreeNav => handle_tree_nav_key(app, key).await,
         Mode::ProjectPicker | Mode::GroupPicker => handle_picker_key(app, key).await,
+        Mode::ConfirmOverwrite => handle_confirm_overwrite_key(app, key).await,
     }
 }
 
@@ -162,7 +163,7 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
 
         // Save preset
         KeyCode::Char('W') => {
-            app.conn.save_preset(None).await?;
+            app.conn.save_preset(None, false).await?;
         }
 
         // Load preset
@@ -250,24 +251,40 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.conn.toggle_layout().await?;
         }
 
-        // Cycle tile layout algorithm
+        // Split pane vertically (side by side)
+        KeyCode::Char('v') => {
+            app.conn.split_pane(SplitDir::Vertical).await?;
+        }
+
+        // Split pane horizontally (top/bottom)
+        KeyCode::Char('-') => {
+            app.conn.split_pane(SplitDir::Horizontal).await?;
+        }
+
+        // Swap split direction (H↔V) at current pane's parent
         KeyCode::Char('T') => {
-            app.conn.cycle_layout().await?;
+            app.conn.swap_split_direction().await?;
         }
 
-        // Toggle current window in/out of tile set
+        // Close current pane (unsplit)
         KeyCode::Char('m') => {
-            if let Some(wid) = app.active_window {
-                app.conn.toggle_tile(wid).await?;
-            }
+            app.conn.close_split().await?;
         }
 
-        // Cycle pane content forward/backward in tiled mode
+        // Cycle pane content forward/backward within group
         KeyCode::Char('n') => {
             app.conn.cycle_pane_content(true).await?;
         }
         KeyCode::Char('N') => {
             app.conn.cycle_pane_content(false).await?;
+        }
+
+        // Cycle pane content globally (across all groups/projects)
+        KeyCode::Char('o') => {
+            app.conn.cycle_pane_content_global(true).await?;
+        }
+        KeyCode::Char('O') => {
+            app.conn.cycle_pane_content_global(false).await?;
         }
 
         _ => {}
@@ -340,12 +357,12 @@ async fn handle_branch_input_key(app: &mut App, key: &crossterm::event::KeyEvent
             app.mode = Mode::Nav;
         }
         KeyCode::Enter => {
-            // Use selected branch if one is highlighted, otherwise use typed text
+            // Use selected branch if one is highlighted, otherwise use first match
+            let filtered = app.filtered_branches();
             let branch = if let Some(idx) = app.branch_selected {
-                let filtered = app.filtered_branches();
                 filtered.get(idx).map(|s| s.to_string())
             } else {
-                None
+                filtered.first().map(|s| s.to_string())
             };
             let branch = branch.unwrap_or_else(|| app.rename_buf.clone());
             if !branch.is_empty() {
@@ -409,11 +426,11 @@ async fn handle_preset_input_key(app: &mut App, key: &crossterm::event::KeyEvent
             }
         }
         KeyCode::Enter => {
+            let filtered = app.filtered_presets();
             let name = if let Some(idx) = app.preset_selected {
-                let filtered = app.filtered_presets();
                 filtered.get(idx).map(|s| s.to_string())
             } else {
-                None
+                filtered.first().map(|s| s.to_string())
             };
             let name = name.unwrap_or_else(|| app.rename_buf.clone());
             let from_tree = app.preset_from_tree;
@@ -836,6 +853,23 @@ fn tree_follow_cursor(app: &mut App, target_id: crate::protocol::NodeId) {
             return;
         }
     }
+}
+
+async fn handle_confirm_overwrite_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            let name = app.overwrite_preset_name.take();
+            app.conn.save_preset(name, true).await?;
+            app.mode = Mode::Nav;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.overwrite_preset_name = None;
+            app.status_message = Some(("Save cancelled".to_string(), std::time::Instant::now()));
+            app.mode = Mode::Nav;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 async fn handle_copy_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {

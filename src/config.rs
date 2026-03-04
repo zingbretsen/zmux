@@ -95,6 +95,10 @@ pub fn list_presets() -> Result<Vec<String>> {
     Ok(presets)
 }
 
+pub fn preset_exists(name: &str) -> bool {
+    presets_dir().join(format!("{}.toml", name)).exists()
+}
+
 pub fn save_preset(name: &str, preset: &Preset) -> Result<()> {
     let dir = presets_dir();
     std::fs::create_dir_all(&dir)?;

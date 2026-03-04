@@ -1,6 +1,6 @@
 use crate::ai_detect::{self, AiStatus};
 use crate::config;
-use crate::protocol::{LayoutMode, NodeId, PaneDirection, ServerMsg, TabEntry, TileLayout, TreeGroup, TreeProject, TreeWindow};
+use crate::protocol::{LayoutMode, NodeId, PaneDirection, ServerMsg, SplitDir, SplitTree, TabEntry, TreeGroup, TreeProject, TreeWindow};
 use crate::pty::PtyHandle;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -32,12 +32,12 @@ pub(crate) struct GroupNode {
     pub(crate) worktree_path: Option<PathBuf>,
     /// Layout mode: stacked (one visible) or tiled (multiple visible)
     pub(crate) layout_mode: LayoutMode,
-    /// Current tile layout algorithm
-    pub(crate) tile_layout: TileLayout,
-    /// Windows marked for tiling (subset of children)
-    pub(crate) tiled_windows: Vec<NodeId>,
-    /// Per-window size weights for tiled layout (width_weight, height_weight), default (1.0, 1.0)
-    pub(crate) pane_weights: HashMap<NodeId, (f64, f64)>,
+    /// Binary split tree for tiled layout (None when in Stacked mode or not yet split)
+    pub(crate) split_tree: Option<SplitTree>,
+    /// Next pane ID to allocate
+    pub(crate) next_pane_id: u32,
+    /// Which pane is currently focused
+    pub(crate) active_pane: Option<u32>,
 }
 
 pub(crate) struct WindowNode {
@@ -126,9 +126,10 @@ impl SessionTree {
         let id = self.alloc_id();
         self.nodes.insert(id, Node::Group(GroupNode {
             name, parent, children: Vec::new(), working_dir, worktree_path,
-            layout_mode: LayoutMode::Stacked, tile_layout: TileLayout::EqualColumns,
-            tiled_windows: Vec::new(),
-            pane_weights: HashMap::new(),
+            layout_mode: LayoutMode::Stacked,
+            split_tree: None,
+            next_pane_id: 0,
+            active_pane: None,
         }));
         if let Some(Node::Project(p)) = self.nodes.get_mut(&parent) {
             p.children.push(id);
@@ -201,11 +202,24 @@ impl SessionTree {
 
         self.nodes.remove(&window_id);
 
-        // Remove from parent group's children and tiled set
+        // Remove from parent group's children and split tree
         if let Some(pid) = parent_id {
             if let Some(Node::Group(g)) = self.nodes.get_mut(&pid) {
                 g.children.retain(|id| *id != window_id);
-                g.tiled_windows.retain(|id| *id != window_id);
+                // Remove from split tree if present
+                if let Some(tree) = g.split_tree.take() {
+                    g.split_tree = tree.remove_window(window_id);
+                    // If tree is gone, reset pane state
+                    if g.split_tree.is_none() {
+                        g.active_pane = None;
+                        g.layout_mode = LayoutMode::Stacked;
+                    } else if let Some(ap) = g.active_pane {
+                        // If active pane was removed, pick the first remaining leaf
+                        if g.split_tree.as_ref().unwrap().window_for_pane(ap).is_none() {
+                            g.active_pane = g.split_tree.as_ref().unwrap().leaves().first().map(|(pid, _)| *pid);
+                        }
+                    }
+                }
             }
         }
 
@@ -386,15 +400,14 @@ impl SessionTree {
             } else { Vec::new() }
         } else { Vec::new() };
 
-        let (layout_mode, tile_layout, tiled_windows, pane_weights) = if let Some(gid) = self.active_group {
+        let (layout_mode, split_tree, active_pane) = if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                let weights: Vec<(NodeId, f64, f64)> = g.pane_weights.iter().map(|(&id, &(w, h))| (id, w, h)).collect();
-                (g.layout_mode, g.tile_layout, g.tiled_windows.clone(), weights)
+                (g.layout_mode, g.split_tree.clone(), g.active_pane)
             } else {
-                (LayoutMode::Stacked, TileLayout::EqualColumns, Vec::new(), Vec::new())
+                (LayoutMode::Stacked, None, None)
             }
         } else {
-            (LayoutMode::Stacked, TileLayout::EqualColumns, Vec::new(), Vec::new())
+            (LayoutMode::Stacked, None, None)
         };
 
         ServerMsg::TabState {
@@ -402,7 +415,7 @@ impl SessionTree {
             active_project: self.active_project,
             active_group: self.active_group,
             active_window: self.active_window,
-            layout_mode, tile_layout, tiled_windows, pane_weights,
+            layout_mode, split_tree, active_pane,
         }
     }
 
@@ -566,11 +579,14 @@ impl SessionTree {
             if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
                 g.layout_mode = match g.layout_mode {
                     LayoutMode::Stacked => {
-                        // Auto-tile active window if nothing is tiled
-                        if g.tiled_windows.is_empty() {
+                        // Create a single-leaf tree if none exists
+                        if g.split_tree.is_none() {
                             if let Some(wid) = self.active_window {
                                 if g.children.contains(&wid) {
-                                    g.tiled_windows.push(wid);
+                                    let pane_id = g.next_pane_id;
+                                    g.next_pane_id += 1;
+                                    g.split_tree = Some(SplitTree::Leaf { pane_id, window_id: wid });
+                                    g.active_pane = Some(pane_id);
                                 }
                             }
                         }
@@ -582,71 +598,246 @@ impl SessionTree {
         }
     }
 
-    pub(crate) fn cycle_layout(&mut self) {
-        if let Some(gid) = self.active_group {
-            if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-                g.tile_layout = g.tile_layout.next();
+    /// Split the active pane in the given direction
+    pub(crate) fn split_pane(&mut self, direction: SplitDir) {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return,
+        };
+        let active_pane = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled => {
+                match g.active_pane {
+                    Some(ap) => ap,
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+
+        // Get the current window for this pane
+        let current_window = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) => {
+                g.split_tree.as_ref().and_then(|t| t.window_for_pane(active_pane))
+            }
+            _ => None,
+        };
+        let current_window = match current_window {
+            Some(w) => w,
+            None => return,
+        };
+
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            let new_pane_id = g.next_pane_id;
+            g.next_pane_id += 1;
+
+            // Replace the active leaf with a split: original on first, new on second
+            fn split_at(tree: SplitTree, target: u32, direction: SplitDir, new_pane_id: u32, window_id: NodeId) -> SplitTree {
+                match tree {
+                    SplitTree::Leaf { pane_id, window_id: wid } if pane_id == target => {
+                        SplitTree::Split {
+                            direction,
+                            ratio: 0.5,
+                            first: Box::new(SplitTree::Leaf { pane_id, window_id: wid }),
+                            second: Box::new(SplitTree::Leaf { pane_id: new_pane_id, window_id }),
+                        }
+                    }
+                    SplitTree::Split { direction: d, ratio, first, second } => {
+                        SplitTree::Split {
+                            direction: d,
+                            ratio,
+                            first: Box::new(split_at(*first, target, direction, new_pane_id, window_id)),
+                            second: Box::new(split_at(*second, target, direction, new_pane_id, window_id)),
+                        }
+                    }
+                    other => other,
+                }
+            }
+
+            if let Some(tree) = g.split_tree.take() {
+                g.split_tree = Some(split_at(tree, active_pane, direction, new_pane_id, current_window));
+                g.active_pane = Some(new_pane_id);
+            }
+        }
+
+        // Update active_window to match the new pane's window
+        self.active_window = Some(current_window);
+    }
+
+    /// Close the active pane (unsplit). Sibling takes parent's place.
+    pub(crate) fn close_split(&mut self) {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return,
+        };
+        let active_pane = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled => g.active_pane,
+            _ => return,
+        };
+        let active_pane = match active_pane {
+            Some(ap) => ap,
+            None => return,
+        };
+
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if let Some(tree) = g.split_tree.take() {
+                match tree.remove_leaf(active_pane) {
+                    Some(new_tree) => {
+                        // Pick the first remaining leaf as the new active pane
+                        let new_active = new_tree.leaves().first().map(|(pid, _)| *pid);
+                        g.split_tree = Some(new_tree);
+                        g.active_pane = new_active;
+                        // Update active_window
+                        if let (Some(ap), Some(ref t)) = (g.active_pane, &g.split_tree) {
+                            self.active_window = t.window_for_pane(ap);
+                        }
+                    }
+                    None => {
+                        // Last pane removed, switch back to stacked
+                        g.split_tree = None;
+                        g.active_pane = None;
+                        g.layout_mode = LayoutMode::Stacked;
+                    }
+                }
             }
         }
     }
 
-    pub(crate) fn toggle_tile(&mut self, window_id: NodeId) {
-        if let Some(gid) = self.active_group {
-            if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-                if !g.children.contains(&window_id) {
-                    return;
-                }
-                if let Some(pos) = g.tiled_windows.iter().position(|&id| id == window_id) {
-                    g.tiled_windows.remove(pos);
-                } else {
-                    g.tiled_windows.push(window_id);
-                }
+    /// Swap split direction (H↔V) at the active pane's parent
+    pub(crate) fn swap_split_direction(&mut self) {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return,
+        };
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if g.layout_mode != LayoutMode::Tiled {
+                return;
+            }
+            if let (Some(ap), Some(ref mut tree)) = (g.active_pane, &mut g.split_tree) {
+                tree.swap_direction_at(ap);
             }
         }
     }
 
-    /// Replace the active window in the tiled set with the next/prev untiled window.
-    /// Cycles relative to the current window's position in the group's children list.
+    /// Cycle pane content: replace the active pane's window with next/prev window in group.
     pub(crate) fn cycle_pane_content(&mut self, forward: bool) -> bool {
         let gid = match self.active_group {
             Some(gid) => gid,
             None => return false,
         };
-        let active = match self.active_window {
-            Some(wid) => wid,
-            None => return false,
-        };
 
-        let (tiled, children) = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled => {
-                (g.tiled_windows.clone(), g.children.clone())
+        let (active_pane, children, tree_windows) = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && g.split_tree.is_some() => {
+                let tw: Vec<NodeId> = g.split_tree.as_ref().unwrap().window_ids();
+                (g.active_pane, g.children.clone(), tw)
             }
             _ => return false,
         };
+        let active_pane = match active_pane {
+            Some(ap) => ap,
+            None => return false,
+        };
 
-        // Active window must be in the tiled set
-        let tile_idx = match tiled.iter().position(|&id| id == active) {
+        let current_window = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) => g.split_tree.as_ref().and_then(|t| t.window_for_pane(active_pane)),
+            _ => None,
+        };
+        let current_window = match current_window {
+            Some(w) => w,
+            None => return false,
+        };
+
+        // Find the current window's position in children
+        let child_idx = match children.iter().position(|&id| id == current_window) {
             Some(i) => i,
             None => return false,
         };
 
-        // Find the current window's position in the group's children list
-        let child_idx = match children.iter().position(|&id| id == active) {
-            Some(i) => i,
-            None => return false,
-        };
-
-        // Find next/prev untiled window relative to the current window in children order
+        // Find next/prev window not already shown in a pane
         let n = children.len();
         let mut replacement = None;
         for step in 1..n {
-            let idx = if forward {
-                (child_idx + step) % n
-            } else {
-                (child_idx + n - step) % n
-            };
+            let idx = if forward { (child_idx + step) % n } else { (child_idx + n - step) % n };
             let candidate = children[idx];
-            if !tiled.contains(&candidate) {
+            if !tree_windows.contains(&candidate) || candidate == current_window {
+                if !tree_windows.contains(&candidate) {
+                    replacement = Some(candidate);
+                    break;
+                }
+            }
+        }
+
+        let replacement = match replacement {
+            Some(id) => id,
+            None => return false,
+        };
+
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if let Some(ref mut tree) = g.split_tree {
+                tree.set_pane_window(active_pane, replacement);
+            }
+        }
+        self.active_window = Some(replacement);
+        true
+    }
+
+    /// Cycle pane content globally: across all groups and projects.
+    pub(crate) fn cycle_pane_content_global(&mut self, forward: bool) -> bool {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return false,
+        };
+
+        let active_pane = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && g.split_tree.is_some() => g.active_pane,
+            _ => return false,
+        };
+        let active_pane = match active_pane {
+            Some(ap) => ap,
+            None => return false,
+        };
+
+        let current_window = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) => g.split_tree.as_ref().and_then(|t| t.window_for_pane(active_pane)),
+            _ => None,
+        };
+        let current_window = match current_window {
+            Some(w) => w,
+            None => return false,
+        };
+
+        // Build a flat list of all window IDs across all projects/groups
+        let mut all_windows = Vec::new();
+        for &pid in &self.root_children {
+            if let Some(Node::Project(p)) = self.nodes.get(&pid) {
+                for &gid2 in &p.children {
+                    if let Some(Node::Group(g2)) = self.nodes.get(&gid2) {
+                        for &wid in &g2.children {
+                            if matches!(self.nodes.get(&wid), Some(Node::Window(_))) {
+                                all_windows.push(wid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if all_windows.is_empty() {
+            return false;
+        }
+
+        // Get windows currently shown in the split tree
+        let tree_windows: Vec<NodeId> = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) => g.split_tree.as_ref().map(|t| t.window_ids()).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+
+        let current_idx = all_windows.iter().position(|&id| id == current_window).unwrap_or(0);
+        let n = all_windows.len();
+        let mut replacement = None;
+        for step in 1..n {
+            let idx = if forward { (current_idx + step) % n } else { (current_idx + n - step) % n };
+            let candidate = all_windows[idx];
+            if !tree_windows.contains(&candidate) {
                 replacement = Some(candidate);
                 break;
             }
@@ -654,105 +845,117 @@ impl SessionTree {
 
         let replacement = match replacement {
             Some(id) => id,
-            None => return false, // all windows are tiled, nothing to swap
+            None => return false,
         };
 
-        // Swap: replace active window at its tile position with the replacement
         if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            g.tiled_windows[tile_idx] = replacement;
-
-            // Transfer pane weight from old window to new
-            if let Some(weight) = g.pane_weights.remove(&active) {
-                g.pane_weights.insert(replacement, weight);
+            if let Some(ref mut tree) = g.split_tree {
+                tree.set_pane_window(active_pane, replacement);
             }
         }
-
         self.active_window = Some(replacement);
         true
     }
 
+    /// Spatial focus navigation: find the nearest pane in the given direction
     pub(crate) fn focus_pane(&mut self, direction: PaneDirection) {
         let gid = match self.active_group {
             Some(gid) => gid,
             None => return,
         };
-        let (tiled, tile_layout) = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && !g.tiled_windows.is_empty() => {
-                (g.tiled_windows.clone(), g.tile_layout)
-            }
+        let active_pane = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && g.split_tree.is_some() => g.active_pane,
             _ => return,
         };
-        let active = match self.active_window {
-            Some(wid) => wid,
+        let active_pane = match active_pane {
+            Some(ap) => ap,
             None => return,
         };
-        let idx = match tiled.iter().position(|&id| id == active) {
-            Some(i) => i,
-            None => return,
-        };
-        let count = tiled.len();
 
-        let new_idx = match tile_layout {
-            TileLayout::EqualColumns => match direction {
-                PaneDirection::Left => if idx > 0 { idx - 1 } else { idx },
-                PaneDirection::Right => if idx + 1 < count { idx + 1 } else { idx },
-                _ => idx,
-            },
-            TileLayout::EqualRows => match direction {
-                PaneDirection::Up => if idx > 0 { idx - 1 } else { idx },
-                PaneDirection::Down => if idx + 1 < count { idx + 1 } else { idx },
-                _ => idx,
-            },
-            TileLayout::MainLeft => match direction {
-                PaneDirection::Left => 0,
-                PaneDirection::Right => if idx == 0 && count > 1 { 1 } else { idx },
-                PaneDirection::Up => if idx > 1 { idx - 1 } else { idx },
-                PaneDirection::Down => if idx >= 1 && idx + 1 < count { idx + 1 } else { idx },
-            },
-            TileLayout::Grid => {
-                let cols_count = (count as f64).sqrt().ceil() as usize;
-                let row = idx / cols_count;
-                let col = idx % cols_count;
-                match direction {
-                    PaneDirection::Left => if col > 0 { idx - 1 } else { idx },
-                    PaneDirection::Right => if col + 1 < cols_count && idx + 1 < count { idx + 1 } else { idx },
-                    PaneDirection::Up => if row > 0 { idx - cols_count } else { idx },
-                    PaneDirection::Down => if idx + cols_count < count { idx + cols_count } else { idx },
+        // Compute spatial rects for all leaves using a dummy area
+        let tree = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) => g.split_tree.clone(),
+            _ => None,
+        };
+        let tree = match tree {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Use a large dummy area; we only care about relative positions
+        let rects = split_tree_rects(&tree, 0, 0, 1000, 1000);
+
+        let current_rect = match rects.iter().find(|(pid, _, _, _, _)| *pid == active_pane) {
+            Some(r) => *r,
+            None => return,
+        };
+        let (_, cx, cy, cw, ch) = current_rect;
+        let center_x = cx + cw / 2;
+        let center_y = cy + ch / 2;
+
+        let mut best: Option<(u32, i32)> = None; // (pane_id, distance)
+        for &(pid, rx, ry, rw, rh) in &rects {
+            if pid == active_pane {
+                continue;
+            }
+            let rcx = rx + rw / 2;
+            let rcy = ry + rh / 2;
+
+            let valid = match direction {
+                PaneDirection::Left => rcx < center_x,
+                PaneDirection::Right => rcx > center_x,
+                PaneDirection::Up => rcy < center_y,
+                PaneDirection::Down => rcy > center_y,
+            };
+            if !valid {
+                continue;
+            }
+
+            let dist = (rcx - center_x).abs() + (rcy - center_y).abs();
+            if best.is_none() || dist < best.unwrap().1 {
+                best = Some((pid, dist));
+            }
+        }
+
+        if let Some((new_pane, _)) = best {
+            if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+                g.active_pane = Some(new_pane);
+                if let Some(ref tree) = g.split_tree {
+                    self.active_window = tree.window_for_pane(new_pane);
                 }
             }
-        };
-
-        self.active_window = Some(tiled[new_idx]);
+        }
     }
 
+    /// Resize the active pane by adjusting its parent split's ratio
     pub(crate) fn resize_pane(&mut self, direction: PaneDirection) {
         let gid = match self.active_group {
             Some(gid) => gid,
             None => return,
         };
-        let wid = match self.active_window {
-            Some(wid) => wid,
-            None => return,
-        };
         if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            if g.layout_mode != LayoutMode::Tiled || !g.tiled_windows.contains(&wid) {
+            if g.layout_mode != LayoutMode::Tiled {
                 return;
             }
-            let (w, h) = g.pane_weights.entry(wid).or_insert((1.0, 1.0));
-            match direction {
-                PaneDirection::Left => *w = (*w - 0.1).max(0.2),
-                PaneDirection::Right => *w = (*w + 0.1).min(5.0),
-                PaneDirection::Up => *h = (*h + 0.1).min(5.0),
-                PaneDirection::Down => *h = (*h - 0.1).max(0.2),
+            if let (Some(ap), Some(ref mut tree)) = (g.active_pane, &mut g.split_tree) {
+                let delta = match direction {
+                    PaneDirection::Right | PaneDirection::Down => 0.05,
+                    PaneDirection::Left | PaneDirection::Up => -0.05,
+                };
+                tree.adjust_ratio_at(ap, delta);
             }
         }
     }
 
-    /// Returns true if the active group is in tiled mode and a window is tiled
+    /// Returns true if the active group is in tiled mode and a window is in the split tree
     pub(crate) fn is_tiled_window(&self, window_id: NodeId) -> bool {
         if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                return g.layout_mode == LayoutMode::Tiled && g.tiled_windows.contains(&window_id);
+                if g.layout_mode == LayoutMode::Tiled {
+                    if let Some(ref tree) = g.split_tree {
+                        return tree.window_ids().contains(&window_id);
+                    }
+                }
             }
         }
         false
@@ -762,7 +965,9 @@ impl SessionTree {
         if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
                 if g.layout_mode == LayoutMode::Tiled {
-                    return &g.tiled_windows;
+                    if let Some(ref tree) = g.split_tree {
+                        return tree.window_ids();
+                    }
                 }
             }
         }
@@ -770,10 +975,12 @@ impl SessionTree {
     }
 
     pub(crate) fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
-        let tiled_sizes = if let Some(gid) = self.active_group {
+        let tiled_sizes: Option<Vec<(u32, NodeId, u16, u16)>> = if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                if g.layout_mode == LayoutMode::Tiled && !g.tiled_windows.is_empty() {
-                    Some(pane_sizes(g.tile_layout, &g.tiled_windows, rows, cols, &g.pane_weights))
+                if g.layout_mode == LayoutMode::Tiled {
+                    g.split_tree.as_ref().map(|tree| {
+                        split_tree_pane_sizes(tree, rows, cols)
+                    })
                 } else {
                     None
                 }
@@ -787,7 +994,7 @@ impl SessionTree {
         for (id, node) in self.nodes.iter() {
             if let Node::Window(w) = node {
                 if let Some(ref sizes) = tiled_sizes {
-                    if let Some((_, r, c)) = sizes.iter().find(|(wid, _, _)| wid == id) {
+                    if let Some((_, _, r, c)) = sizes.iter().find(|(_, wid, _, _)| wid == id) {
                         w.pty.resize(*r, *c)?;
                         continue;
                     }
@@ -916,79 +1123,68 @@ impl SessionTree {
     }
 }
 
-/// Compute pane sizes for a tile layout. Returns (window_id, rows, cols) for each tiled window.
-pub(crate) fn pane_sizes(layout: TileLayout, windows: &[NodeId], total_rows: u16, total_cols: u16, weights: &HashMap<NodeId, (f64, f64)>) -> Vec<(NodeId, u16, u16)> {
-    let n = windows.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    if n == 1 {
-        return vec![(windows[0], total_rows, total_cols)];
-    }
-
-    let distribute = |usable: u16, items: &[NodeId], get_weight: &dyn Fn(NodeId) -> f64| -> Vec<u16> {
-        let total_weight: f64 = items.iter().map(|&id| get_weight(id)).sum();
-        let mut sizes = Vec::with_capacity(items.len());
-        let mut used: u16 = 0;
-        for (i, &id) in items.iter().enumerate() {
-            if i == items.len() - 1 {
-                sizes.push(usable.saturating_sub(used));
-            } else {
-                let s = ((usable as f64) * get_weight(id) / total_weight).round() as u16;
-                sizes.push(s);
-                used += s;
+/// Compute pane sizes for a split tree. Returns (pane_id, window_id, rows, cols) for each leaf.
+pub(crate) fn split_tree_pane_sizes(tree: &SplitTree, total_rows: u16, total_cols: u16) -> Vec<(u32, NodeId, u16, u16)> {
+    let mut result = Vec::new();
+    fn walk(tree: &SplitTree, rows: u16, cols: u16, result: &mut Vec<(u32, NodeId, u16, u16)>) {
+        match tree {
+            SplitTree::Leaf { pane_id, window_id } => {
+                result.push((*pane_id, *window_id, rows, cols));
+            }
+            SplitTree::Split { direction, ratio, first, second } => {
+                match direction {
+                    SplitDir::Vertical => {
+                        // Split columns: first gets ratio*cols, second gets rest (minus 1 for border)
+                        let usable = cols.saturating_sub(1); // 1 col for border
+                        let first_cols = ((usable as f64) * ratio).round() as u16;
+                        let second_cols = usable.saturating_sub(first_cols);
+                        walk(first, rows, first_cols, result);
+                        walk(second, rows, second_cols, result);
+                    }
+                    SplitDir::Horizontal => {
+                        // Split rows: first gets ratio*rows, second gets rest (minus 1 for border)
+                        let usable = rows.saturating_sub(1);
+                        let first_rows = ((usable as f64) * ratio).round() as u16;
+                        let second_rows = usable.saturating_sub(first_rows);
+                        walk(first, first_rows, cols, result);
+                        walk(second, second_rows, cols, result);
+                    }
+                }
             }
         }
-        sizes
-    };
+    }
+    walk(tree, total_rows, total_cols, &mut result);
+    result
+}
 
-    let w_weight = |id: NodeId| -> f64 { weights.get(&id).map_or(1.0, |&(w, _)| w) };
-    let h_weight = |id: NodeId| -> f64 { weights.get(&id).map_or(1.0, |&(_, h)| h) };
-
-    match layout {
-        TileLayout::EqualColumns => {
-            let borders = (n - 1) as u16;
-            let usable = total_cols.saturating_sub(borders);
-            let widths = distribute(usable, windows, &w_weight);
-            windows.iter().zip(widths).map(|(&wid, w)| (wid, total_rows, w)).collect()
-        }
-        TileLayout::EqualRows => {
-            let borders = (n - 1) as u16;
-            let usable = total_rows.saturating_sub(borders);
-            let heights = distribute(usable, windows, &h_weight);
-            windows.iter().zip(heights).map(|(&wid, h)| (wid, h, total_cols)).collect()
-        }
-        TileLayout::MainLeft => {
-            let main_w = w_weight(windows[0]);
-            let side_total_w: f64 = windows[1..].iter().map(|&id| w_weight(id)).sum::<f64>() / (n - 1) as f64;
-            let total_w = main_w + side_total_w;
-            let main_cols = ((total_cols.saturating_sub(1) as f64) * main_w / total_w).round() as u16;
-            let side_cols = total_cols.saturating_sub(main_cols + 1);
-            let mut result = vec![(windows[0], total_rows, main_cols)];
-            let side_count = n - 1;
-            let borders = if side_count > 1 { (side_count - 1) as u16 } else { 0 };
-            let usable_h = total_rows.saturating_sub(borders);
-            let side_windows = &windows[1..];
-            let heights = distribute(usable_h, side_windows, &h_weight);
-            for (&wid, h) in side_windows.iter().zip(heights) {
-                result.push((wid, h, side_cols));
+/// Compute spatial rects (for focus navigation). Returns (pane_id, x, y, w, h) using i32.
+pub(crate) fn split_tree_rects(tree: &SplitTree, x: i32, y: i32, w: i32, h: i32) -> Vec<(u32, i32, i32, i32, i32)> {
+    let mut result = Vec::new();
+    fn walk(tree: &SplitTree, x: i32, y: i32, w: i32, h: i32, result: &mut Vec<(u32, i32, i32, i32, i32)>) {
+        match tree {
+            SplitTree::Leaf { pane_id, .. } => {
+                result.push((*pane_id, x, y, w, h));
             }
-            result
-        }
-        TileLayout::Grid => {
-            let cols_count = (n as f64).sqrt().ceil() as usize;
-            let rows_count = (n + cols_count - 1) / cols_count;
-            let h_borders = if rows_count > 1 { (rows_count - 1) as u16 } else { 0 };
-            let v_borders = if cols_count > 1 { (cols_count - 1) as u16 } else { 0 };
-            let cell_h = total_rows.saturating_sub(h_borders) / rows_count as u16;
-            let cell_w = total_cols.saturating_sub(v_borders) / cols_count as u16;
-            let mut result = Vec::new();
-            for &wid in windows {
-                result.push((wid, cell_h, cell_w));
+            SplitTree::Split { direction, ratio, first, second } => {
+                match direction {
+                    SplitDir::Vertical => {
+                        let first_w = ((w as f64) * ratio).round() as i32;
+                        let second_w = w - first_w;
+                        walk(first, x, y, first_w, h, result);
+                        walk(second, x + first_w, y, second_w, h, result);
+                    }
+                    SplitDir::Horizontal => {
+                        let first_h = ((h as f64) * ratio).round() as i32;
+                        let second_h = h - first_h;
+                        walk(first, x, y, w, first_h, result);
+                        walk(second, x, y + first_h, w, second_h, result);
+                    }
+                }
             }
-            result
         }
     }
+    walk(tree, x, y, w, h, &mut result);
+    result
 }
 
 #[cfg(test)]
@@ -996,75 +1192,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pane_sizes_single_window() {
-        let windows = vec![1];
-        let weights = HashMap::new();
-        let result = pane_sizes(TileLayout::EqualColumns, &windows, 24, 80, &weights);
-        assert_eq!(result, vec![(1, 24, 80)]);
+    fn split_tree_pane_sizes_single() {
+        let tree = SplitTree::Leaf { pane_id: 0, window_id: 1 };
+        let result = split_tree_pane_sizes(&tree, 24, 80);
+        assert_eq!(result, vec![(0, 1, 24, 80)]);
     }
 
     #[test]
-    fn pane_sizes_two_columns() {
-        let windows = vec![1, 2];
-        let weights = HashMap::new();
-        let result = pane_sizes(TileLayout::EqualColumns, &windows, 24, 81, &weights);
-        // 81 cols - 1 border = 80 usable, split 40/40
+    fn split_tree_pane_sizes_vertical() {
+        let tree = SplitTree::Split {
+            direction: SplitDir::Vertical,
+            ratio: 0.5,
+            first: Box::new(SplitTree::Leaf { pane_id: 0, window_id: 1 }),
+            second: Box::new(SplitTree::Leaf { pane_id: 1, window_id: 2 }),
+        };
+        let result = split_tree_pane_sizes(&tree, 24, 81);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].0, 1);
-        assert_eq!(result[1].0, 2);
-        assert_eq!(result[0].1, 24); // full rows
-        assert_eq!(result[1].1, 24);
-        assert_eq!(result[0].2 + result[1].2, 80); // total usable cols
+        assert_eq!(result[0].2, 24); // full rows
+        assert_eq!(result[1].2, 24);
+        // 81 - 1 border = 80, 50% = 40 each
+        assert_eq!(result[0].3 + result[1].3, 80);
     }
 
     #[test]
-    fn pane_sizes_two_rows() {
-        let windows = vec![1, 2];
-        let weights = HashMap::new();
-        let result = pane_sizes(TileLayout::EqualRows, &windows, 25, 80, &weights);
+    fn split_tree_pane_sizes_horizontal() {
+        let tree = SplitTree::Split {
+            direction: SplitDir::Horizontal,
+            ratio: 0.5,
+            first: Box::new(SplitTree::Leaf { pane_id: 0, window_id: 1 }),
+            second: Box::new(SplitTree::Leaf { pane_id: 1, window_id: 2 }),
+        };
+        let result = split_tree_pane_sizes(&tree, 25, 80);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].2, 80); // full cols
-        assert_eq!(result[1].2, 80);
-        assert_eq!(result[0].1 + result[1].1, 24); // 25 - 1 border
-    }
-
-    #[test]
-    fn pane_sizes_empty() {
-        let result = pane_sizes(TileLayout::EqualColumns, &[], 24, 80, &HashMap::new());
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn pane_sizes_weighted() {
-        let windows = vec![1, 2];
-        let mut weights = HashMap::new();
-        weights.insert(1, (2.0, 1.0)); // window 1 is 2x wider
-        let result = pane_sizes(TileLayout::EqualColumns, &windows, 24, 81, &weights);
-        // 80 usable, weights 2:1 => ~53:27
-        assert!(result[0].2 > result[1].2);
-    }
-
-    #[test]
-    fn pane_sizes_main_left() {
-        let windows = vec![1, 2, 3];
-        let weights = HashMap::new();
-        let result = pane_sizes(TileLayout::MainLeft, &windows, 24, 80, &weights);
-        assert_eq!(result.len(), 3);
-        // Main pane should be wider than side panes
-        assert!(result[0].2 > result[1].2);
-        // Side panes share height
-        assert_eq!(result[1].2, result[2].2);
-    }
-
-    #[test]
-    fn pane_sizes_grid() {
-        let windows = vec![1, 2, 3, 4];
-        let weights = HashMap::new();
-        let result = pane_sizes(TileLayout::Grid, &windows, 24, 80, &weights);
-        assert_eq!(result.len(), 4);
-        // All cells same size in grid
-        assert_eq!(result[0].1, result[1].1);
-        assert_eq!(result[0].2, result[1].2);
+        assert_eq!(result[0].3, 80); // full cols
+        assert_eq!(result[1].3, 80);
+        assert_eq!(result[0].2 + result[1].2, 24); // 25 - 1 border
     }
 }
 

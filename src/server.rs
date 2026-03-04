@@ -1,5 +1,5 @@
 use crate::config;
-use crate::protocol::{self, ClientMsg, LayoutMode, NodeId, ServerMsg, TileLayout};
+use crate::protocol::{self, ClientMsg, LayoutMode, NodeId, ServerMsg};
 use crate::pty::PtyHandle;
 use crate::session::{GroupNode, Node, ProjectNode, SessionTree, WindowNode};
 use crate::worktree;
@@ -48,9 +48,9 @@ enum SerializedNode {
         working_dir: Option<String>,
         worktree_path: Option<String>,
         layout_mode: LayoutMode,
-        tile_layout: TileLayout,
-        tiled_windows: Vec<NodeId>,
-        pane_weights: Vec<(NodeId, f64, f64)>,
+        split_tree: Option<protocol::SplitTree>,
+        next_pane_id: u32,
+        active_pane: Option<u32>,
     },
     Window {
         name: String,
@@ -393,13 +393,9 @@ fn serialize_state(
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
                 layout_mode: g.layout_mode,
-                tile_layout: g.tile_layout,
-                tiled_windows: g.tiled_windows.clone(),
-                pane_weights: g
-                    .pane_weights
-                    .iter()
-                    .map(|(&id, &(w, h))| (id, w, h))
-                    .collect(),
+                split_tree: g.split_tree.clone(),
+                next_pane_id: g.next_pane_id,
+                active_pane: g.active_pane,
             },
             Node::Window(_) => continue,
         };
@@ -559,9 +555,9 @@ fn restore_session(
                 working_dir,
                 worktree_path,
                 layout_mode,
-                tile_layout,
-                tiled_windows,
-                pane_weights,
+                split_tree,
+                next_pane_id,
+                active_pane,
             } => Node::Group(GroupNode {
                 name,
                 parent,
@@ -569,12 +565,9 @@ fn restore_session(
                 working_dir: working_dir.map(PathBuf::from),
                 worktree_path: worktree_path.map(PathBuf::from),
                 layout_mode,
-                tile_layout,
-                tiled_windows,
-                pane_weights: pane_weights
-                    .into_iter()
-                    .map(|(id, w, h)| (id, (w, h)))
-                    .collect(),
+                split_tree,
+                next_pane_id,
+                active_pane,
             }),
             SerializedNode::Window {
                 name,
@@ -937,7 +930,7 @@ async fn handle_client(
                     .unwrap_or_else(|| "No active window".to_string());
                 let _ = client_tx.send(ServerMsg::Info { message: msg });
             }
-            ClientMsg::SavePreset { name } => {
+            ClientMsg::SavePreset { name, force } => {
                 let preset_name = name
                     .or_else(|| st.preset_name.clone())
                     .unwrap_or_else(|| {
@@ -950,18 +943,24 @@ async fn handle_client(
                             })
                             .unwrap_or_else(|| "default".to_string())
                     });
-                let preset = st.session.to_preset();
-                match config::save_preset(&preset_name, &preset) {
-                    Ok(_) => {
-                        st.preset_name = Some(preset_name.clone());
-                        let _ = client_tx.send(ServerMsg::Info {
-                            message: format!("Saved preset: {}", preset_name),
-                        });
-                    }
-                    Err(e) => {
-                        let _ = client_tx.send(ServerMsg::Error {
-                            message: format!("Failed to save: {}", e),
-                        });
+                if !force && config::preset_exists(&preset_name) {
+                    let _ = client_tx.send(ServerMsg::ConfirmOverwrite {
+                        name: preset_name,
+                    });
+                } else {
+                    let preset = st.session.to_preset();
+                    match config::save_preset(&preset_name, &preset) {
+                        Ok(_) => {
+                            st.preset_name = Some(preset_name.clone());
+                            let _ = client_tx.send(ServerMsg::Info {
+                                message: format!("Saved preset: {}", preset_name),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = client_tx.send(ServerMsg::Error {
+                                message: format!("Failed to save: {}", e),
+                            });
+                        }
                     }
                 }
             }
@@ -1357,8 +1356,8 @@ async fn handle_client(
                     }
                 }
             }
-            ClientMsg::CycleLayout => {
-                st.session.cycle_layout();
+            ClientMsg::SplitPane { direction } => {
+                st.session.split_pane(direction);
                 let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(3);
                 let cols = cols.saturating_sub(2);
@@ -1376,8 +1375,33 @@ async fn handle_client(
                     }
                 }
             }
-            ClientMsg::ToggleTile { id } => {
-                st.session.toggle_tile(id);
+            ClientMsg::CloseSplit => {
+                st.session.close_split();
+                let (cols, rows) = st.effective_size();
+                let term_rows = rows.saturating_sub(3);
+                let cols = cols.saturating_sub(2);
+                let _ = st.session.resize_all(term_rows, cols);
+                let tab = st.session.tab_state();
+                st.broadcast(tab);
+                for wid in st.session.active_tiled_windows() {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        st.broadcast(ServerMsg::ScreenDump {
+                            window_id: wid,
+                            data,
+                        });
+                    }
+                }
+                if let Some(wid) = st.session.active_window {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        st.broadcast(ServerMsg::ScreenDump {
+                            window_id: wid,
+                            data,
+                        });
+                    }
+                }
+            }
+            ClientMsg::SwapSplitDirection => {
+                st.session.swap_split_direction();
                 let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(3);
                 let cols = cols.saturating_sub(2);
@@ -1417,6 +1441,28 @@ async fn handle_client(
                     });
                 }
             }
+            ClientMsg::CyclePaneContentGlobal { forward } => {
+                if st.session.cycle_pane_content_global(forward) {
+                    let (cols, rows) = st.effective_size();
+                    let term_rows = rows.saturating_sub(3);
+                    let cols = cols.saturating_sub(2);
+                    let _ = st.session.resize_all(term_rows, cols);
+                    let tab = st.session.tab_state();
+                    st.broadcast(tab);
+                    for wid in st.session.active_tiled_windows() {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            st.broadcast(ServerMsg::ScreenDump {
+                                window_id: wid,
+                                data,
+                            });
+                        }
+                    }
+                } else {
+                    let _ = client_tx.send(ServerMsg::Info {
+                        message: "No other windows to swap".to_string(),
+                    });
+                }
+            }
             ClientMsg::FocusPane { direction } => {
                 st.session.focus_pane(direction);
                 let tab = st.session.tab_state();
@@ -1432,19 +1478,12 @@ async fn handle_client(
                 }
                 let tab = st.session.tab_state();
                 st.broadcast(tab);
-                if let Some(gid) = st.session.active_group {
-                    if let Some(Node::Group(g)) = st.session.nodes.get(&gid) {
-                        if g.layout_mode == LayoutMode::Tiled {
-                            let tw = g.tiled_windows.clone();
-                            for wid in tw {
-                                if let Some(data) = st.session.screen_dump(wid) {
-                                    st.broadcast(ServerMsg::ScreenDump {
-                                        window_id: wid,
-                                        data,
-                                    });
-                                }
-                            }
-                        }
+                for wid in st.session.active_tiled_windows() {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        st.broadcast(ServerMsg::ScreenDump {
+                            window_id: wid,
+                            data,
+                        });
                     }
                 }
             }
