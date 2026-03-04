@@ -18,6 +18,12 @@ pub struct PtyHandle {
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
+        // Send SIGHUP to the child process (standard signal for terminal hangup)
+        if let Some(pid) = self.child_pid {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGHUP);
+            }
+        }
         if self.master_fd >= 0 {
             unsafe {
                 libc::close(self.master_fd);

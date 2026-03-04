@@ -836,11 +836,15 @@ async fn handle_client(
                         let (cols, rows) = st.effective_size();
                         let term_rows = rows.saturating_sub(3);
                         let cols = cols.saturating_sub(2);
+                        let mut first_project_id = None;
                         for proj_preset in &preset.projects {
                             let project_id = st.session.add_project(
                                 proj_preset.name.clone(),
                                 PathBuf::from(&proj_preset.path),
                             );
+                            if first_project_id.is_none() {
+                                first_project_id = Some(project_id);
+                            }
                             for grp_preset in &proj_preset.groups {
                                 let group_dir =
                                     grp_preset.path.as_ref().map(|p| PathBuf::from(p));
@@ -881,6 +885,10 @@ async fn handle_client(
                                     }
                                 }
                             }
+                        }
+                        // Jump to the first project's first window
+                        if let Some(pid) = first_project_id {
+                            st.session.select_project(pid);
                         }
                         let tab = st.session.tab_state();
                         st.broadcast(tab);

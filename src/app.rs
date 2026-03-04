@@ -454,17 +454,5 @@ impl App {
         None
     }
 
-    /// Get the name of a node in tree_data
-    pub fn tree_node_name(&self, id: NodeId) -> Option<String> {
-        for proj in &self.tree_data {
-            if proj.id == id { return Some(proj.name.clone()); }
-            for grp in &proj.groups {
-                if grp.id == id { return Some(grp.name.clone()); }
-                for win in &grp.windows {
-                    if win.id == id { return Some(win.name.clone()); }
-                }
-            }
-        }
-        None
-    }
+
 }
