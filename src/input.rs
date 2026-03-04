@@ -114,7 +114,6 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
 
         KeyCode::Char('x') => {
             app.conn.close_window().await?;
-            app.mode = Mode::Normal;
         }
         KeyCode::Char('c') => {
             app.conn.new_window(None).await?;
@@ -122,11 +121,9 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         }
         KeyCode::Char('g') => {
             app.conn.move_window_to_new_group().await?;
-            app.mode = Mode::Normal;
         }
         KeyCode::Char('p') => {
             app.conn.move_window_to_new_project().await?;
-            app.mode = Mode::Normal;
         }
 
         // Rename the focused tab
@@ -158,17 +155,14 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         // Save current cwd as group dir (s) or project dir (S)
         KeyCode::Char('S') => {
             app.conn.set_project_dir().await?;
-            app.mode = Mode::Normal;
         }
         KeyCode::Char('s') => {
             app.conn.set_group_dir().await?;
-            app.mode = Mode::Normal;
         }
 
         // Save preset
         KeyCode::Char('W') => {
             app.conn.save_preset(None).await?;
-            app.mode = Mode::Normal;
         }
 
         // Load preset
@@ -192,13 +186,11 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         // Rebase onto main
         KeyCode::Char('R') => {
             app.conn.rebase_main().await?;
-            app.mode = Mode::Normal;
         }
 
         // Merge worktree branch into main
         KeyCode::Char('M') => {
             app.conn.merge_into_main().await?;
-            app.mode = Mode::Normal;
         }
 
         // Search across windows
@@ -234,7 +226,6 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         // Close group (with worktree cleanup)
         KeyCode::Char('X') => {
             app.conn.close_group(false).await?;
-            app.mode = Mode::Normal;
         }
 
         // Tree nav (session overview)
@@ -246,7 +237,6 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         // Hot reload server binary
         KeyCode::Char('u') => {
             app.conn.reload().await?;
-            app.mode = Mode::Normal;
         }
 
         // Help
@@ -326,7 +316,7 @@ async fn handle_rename_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
                 app.conn.request_tree().await?;
                 app.mode = Mode::TreeNav;
             } else {
-                app.mode = Mode::Normal;
+                app.mode = Mode::Nav;
             }
         }
         KeyCode::Backspace => {

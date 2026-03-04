@@ -244,6 +244,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                         default_rows,
                         default_cols,
                         pty_tx.clone(),
+                        None,
                     )?;
                 } else {
                     for win_preset in &grp_preset.windows {
@@ -253,6 +254,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                             default_rows,
                             default_cols,
                             pty_tx.clone(),
+                            win_preset.command.clone(),
                         )?;
                     }
                 }
@@ -266,6 +268,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                     default_rows,
                     default_cols,
                     pty_tx.clone(),
+                    None,
                 )?;
             }
         }
@@ -283,6 +286,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
             default_rows,
             default_cols,
             pty_tx.clone(),
+            None,
         )?;
     }
 
@@ -739,6 +743,7 @@ async fn handle_client(
                         term_rows,
                         cols,
                         pty_tx.clone(),
+                        None,
                     ) {
                         st.session.select_window(id);
                         let tab = st.session.tab_state();
@@ -765,6 +770,7 @@ async fn handle_client(
                         term_rows,
                         cols,
                         pty_tx.clone(),
+                        None,
                     ) {
                         st.session.select_group(group_id);
                         st.session.select_window(wid);
@@ -794,6 +800,7 @@ async fn handle_client(
                     term_rows,
                     cols,
                     pty_tx.clone(),
+                    None,
                 ) {
                     st.session.select_project(project_id);
                     st.session.select_window(wid);
@@ -859,6 +866,7 @@ async fn handle_client(
                                         term_rows,
                                         cols,
                                         pty_tx.clone(),
+                                        None,
                                     );
                                 } else {
                                     for win_preset in &grp_preset.windows {
@@ -868,6 +876,7 @@ async fn handle_client(
                                             term_rows,
                                             cols,
                                             pty_tx.clone(),
+                                            win_preset.command.clone(),
                                         );
                                     }
                                 }
@@ -1185,6 +1194,7 @@ async fn handle_client(
                                 term_rows,
                                 cols,
                                 pty_tx.clone(),
+                                None,
                             ) {
                                 st.session.select_group(group_id);
                                 st.session.select_window(wid);

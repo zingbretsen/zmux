@@ -118,6 +118,7 @@ impl SessionTree {
         rows: u16,
         cols: u16,
         pty_output_tx: mpsc::UnboundedSender<(NodeId, Vec<u8>)>,
+        command: Option<String>,
     ) -> Result<NodeId> {
         let id = self.alloc_id();
         let working_dir = self.window_working_dir(parent);
@@ -133,7 +134,12 @@ impl SessionTree {
             }
         }
 
-        let (pty, mut pty_rx) = PtyHandle::spawn_in(rows, cols, &working_dir, &env, self.shell.as_deref())?;
+        let (mut pty, mut pty_rx) = PtyHandle::spawn_in(rows, cols, &working_dir, &env, self.shell.as_deref())?;
+
+        // If a startup command was specified, write it to the PTY
+        if let Some(ref cmd) = command {
+            let _ = pty.write(format!("{}\n", cmd).as_bytes());
+        }
 
         // Forward raw PTY bytes with window ID
         let win_id = id;
