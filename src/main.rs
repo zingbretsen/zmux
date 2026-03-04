@@ -13,7 +13,7 @@ mod worktree;
 use anyhow::Result;
 use app::App;
 use crossterm::{
-    event::{Event, EventStream, EnableMouseCapture, DisableMouseCapture},
+    event::{Event, EventStream, KeyEventKind, EnableMouseCapture, DisableMouseCapture},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -153,9 +153,13 @@ async fn run_client() -> Result<()> {
 
 async fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     let mut event_stream = EventStream::new();
+    let mut needs_draw = true;
 
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
+        if needs_draw {
+            terminal.draw(|f| ui::draw(f, app))?;
+            needs_draw = false;
+        }
 
         tokio::select! {
             msg = app.conn.msg_rx.recv() => {
@@ -169,12 +173,22 @@ async fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &m
                 while let Ok(m) = app.conn.msg_rx.try_recv() {
                     app.apply_server_msg(m);
                 }
+                needs_draw = true;
             }
             event = event_stream.next() => {
                 match event {
-                    Some(Ok(Event::Key(key))) => input::handle_key(app, &key).await?,
-                    Some(Ok(Event::Resize(cols, rows))) => app.resize(cols, rows).await?,
-                    Some(Ok(Event::Mouse(mouse))) => input::handle_mouse(app, &mouse).await?,
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        input::handle_key(app, &key).await?;
+                        needs_draw = true;
+                    }
+                    Some(Ok(Event::Resize(cols, rows))) => {
+                        app.resize(cols, rows).await?;
+                        needs_draw = true;
+                    }
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        input::handle_mouse(app, &mouse).await?;
+                        needs_draw = true;
+                    }
                     Some(Err(_)) | None => break,
                     _ => {}
                 }

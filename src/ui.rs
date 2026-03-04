@@ -7,18 +7,26 @@ use std::time::Duration;
 use tui_term::widget::PseudoTerminal;
 
 pub enum TabClick {
-    Project(usize),
-    Group(usize),
+    Project,
+    Group,
     Window(usize),
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
+    // Outer border to indicate we're inside zmux
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title_bottom(Line::from(" zmux ").right_aligned());
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
 
     draw_tab_bar(f, app, chunks[0]);
 
@@ -39,8 +47,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::Copy) {
         draw_copy_overlay(f, app, chunks[1]);
     }
-
-    draw_bottom_bar(f, app, chunks[2]);
 
     if matches!(app.mode, Mode::Help) {
         draw_help(f, area);
@@ -164,8 +170,8 @@ fn draw_branch_picker(f: &mut Frame, app: &App, area: Rect) {
     let width = width.min(area.width);
 
     // Position below the tab bar
-    let x = area.x + 1;
-    let y = area.y + 1; // just below tab bar
+    let x = area.x + 2;
+    let y = area.y + 2; // below border + tab bar
     let popup = Rect::new(x, y, width, height);
 
     f.render_widget(Clear, popup);
@@ -221,8 +227,8 @@ fn draw_preset_picker(f: &mut Frame, app: &App, area: Rect) {
     let width = filtered.iter().map(|p| p.len()).max().unwrap_or(10).max(20) as u16 + 4;
     let width = width.min(area.width);
 
-    let x = area.x + 1;
-    let y = area.y + 1;
+    let x = area.x + 2;
+    let y = area.y + 2;
     let popup = Rect::new(x, y, width, height);
 
     f.render_widget(Clear, popup);
@@ -281,8 +287,8 @@ fn draw_picker_dropdown(f: &mut Frame, app: &App, area: Rect) {
     let width = items.iter().map(|e| e.name.len()).max().unwrap_or(10).max(12) as u16 + 4;
     let width = width.min(area.width);
 
-    let x = (app.dropdown_x).min(area.width.saturating_sub(width));
-    let y = area.y + 1;
+    let x = (app.dropdown_x + 1).min(area.width.saturating_sub(width));
+    let y = area.y + 2;
     let popup = Rect::new(x, y, width, height);
 
     f.render_widget(Clear, popup);
@@ -339,8 +345,8 @@ pub fn picker_dropdown_rect(app: &App) -> Option<Rect> {
     let width = items.iter().map(|e| e.name.len()).max().unwrap_or(10).max(12) as u16 + 4;
     let (cols, _rows) = app.last_size;
     let width = width.min(cols);
-    let x = app.dropdown_x.min(cols.saturating_sub(width));
-    Some(Rect::new(x, 1, width, height))
+    let x = (app.dropdown_x + 1).min(cols.saturating_sub(width));
+    Some(Rect::new(x, 2, width, height))
 }
 
 fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
@@ -590,13 +596,6 @@ fn compute_tile_rects(layout: TileLayout, windows: &[NodeId], area: Rect, weight
     }
 }
 
-fn draw_bottom_bar(f: &mut Frame, _app: &App, area: Rect) {
-    let line = Line::from(vec![
-        Span::styled(" zmux", Style::default().fg(Color::DarkGray)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
-}
-
 fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     // For text input modes, take over the full tab bar
     if matches!(app.mode, Mode::Rename) {
@@ -776,13 +775,13 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
     let proj_name = app.projects.get(active_proj_idx).map(|e| e.name.as_str()).unwrap_or("?");
     let proj_span = 1 + proj_name.len(); // " {name}"
     if col < x + proj_span {
-        return Some(TabClick::Project(active_proj_idx));
+        return Some(TabClick::Project);
     }
     x += proj_span;
 
     // " > " separator — attribute to project
     if col < x + 3 {
-        return Some(TabClick::Project(active_proj_idx));
+        return Some(TabClick::Project);
     }
     x += 3;
 
@@ -793,7 +792,7 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
     let grp_name = app.groups.get(active_grp_idx).map(|e| e.name.as_str()).unwrap_or("?");
     let grp_span = grp_name.len();
     if col < x + grp_span {
-        return Some(TabClick::Group(active_grp_idx));
+        return Some(TabClick::Group);
     }
     x += grp_span;
 
@@ -801,14 +800,14 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
     if app.layout_mode == LayoutMode::Tiled {
         let layout_span = 2 + app.tile_layout.name().len() + 1; // " [name]"
         if col < x + layout_span {
-            return Some(TabClick::Group(active_grp_idx));
+            return Some(TabClick::Group);
         }
         x += layout_span;
     }
 
     // " > " separator — attribute to group
     if col < x + 3 {
-        return Some(TabClick::Group(active_grp_idx));
+        return Some(TabClick::Group);
     }
     x += 3;
 
@@ -816,7 +815,7 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
     let nav = matches!(app.mode, Mode::Nav);
     let prefix_width = x;
     let suffix_width = if nav { 6 } else { 0 };
-    let avail_width = (app.last_size.0 as usize).saturating_sub(prefix_width + suffix_width);
+    let avail_width = (app.last_size.0 as usize).saturating_sub(prefix_width + suffix_width + 2); // +2 for border
 
     let tab_widths: Vec<usize> = app.windows.iter().enumerate().map(|(i, entry)| {
         let tile_prefix = if app.tiled_windows.contains(&entry.id) { 1 } else { 0 };

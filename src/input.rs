@@ -691,8 +691,7 @@ async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) ->
         KeyCode::Char('r') => {
             if let Some(item) = items.get(app.tree_cursor) {
                 let id = tree_item_id(item);
-                let name = app.tree_node_name(id).unwrap_or_default();
-                app.rename_buf = name;
+                app.rename_buf.clear();
                 app.rename_target = Some(id);
                 app.mode = Mode::Rename;
             }
@@ -1222,12 +1221,12 @@ pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -
         }
     }
 
-    // Tab bar clicks work in any mode
-    if mouse.row == 0 {
+    // Tab bar clicks work in any mode (row 1 = tab bar, row 0 = border)
+    if mouse.row == 1 {
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            if let Some(click) = ui::tab_click_at(app, mouse.column) {
+            if let Some(click) = ui::tab_click_at(app, mouse.column.saturating_sub(1)) {
                 match click {
-                    ui::TabClick::Project(_) => {
+                    ui::TabClick::Project => {
                         app.dropdown_x = 1; // project starts at column 1
                         app.dropdown_selected = app.active_project
                             .and_then(|id| app.projects.iter().position(|e| e.id == id))
@@ -1235,7 +1234,7 @@ pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -
                         app.mode = Mode::ProjectPicker;
                         return Ok(());
                     }
-                    ui::TabClick::Group(_) => {
+                    ui::TabClick::Group => {
                         let proj_name = app.active_project
                             .and_then(|id| app.projects.iter().find(|e| e.id == id))
                             .map(|e| e.name.as_str())

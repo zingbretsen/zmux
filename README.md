@@ -125,7 +125,10 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 
 ## Presets
 
-Presets are TOML files stored in `~/.config/zmux/presets/`. They define the session tree structure:
+Presets are TOML files that define the session tree structure. They are stored in:
+
+- **macOS**: `~/Library/Application Support/zmux/presets/`
+- **Linux**: `~/.config/zmux/presets/`
 
 ```toml
 [[project]]
@@ -137,6 +140,11 @@ name = "default"
 
 [[project.group.window]]
 name = "editor"
+command = "vim"
+
+[[project.group.window]]
+name = "dev-server"
+command = "task web:dev"
 
 [[project.group]]
 name = "feature-branch"

@@ -106,7 +106,8 @@ pub struct App {
 impl App {
     pub async fn new(conn: ClientConnection, rows: u16, cols: u16) -> Result<Self> {
         conn.send_resize(cols, rows).await?;
-        let term_rows = rows.saturating_sub(2);
+        let term_rows = rows.saturating_sub(3);
+        let term_cols = cols.saturating_sub(2);
         Ok(App {
             conn,
             should_quit: false,
@@ -127,7 +128,7 @@ impl App {
             pane_weights: HashMap::new(),
             parsers: HashMap::new(),
             term_rows,
-            term_cols: cols,
+            term_cols,
             rename_buf: String::new(),
             rename_target: None,
             copy_scroll_offset: 0,
@@ -242,11 +243,11 @@ impl App {
     pub async fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         if self.last_size != (cols, rows) {
             self.last_size = (cols, rows);
-            self.term_rows = rows.saturating_sub(2);
-            self.term_cols = cols;
+            self.term_rows = rows.saturating_sub(3);
+            self.term_cols = cols.saturating_sub(2);
             // Resize all existing parsers
             for parser in self.parsers.values() {
-                parser.lock().unwrap().set_size(self.term_rows, cols);
+                parser.lock().unwrap().set_size(self.term_rows, self.term_cols);
             }
             self.conn.send_resize(cols, rows).await?;
         }
