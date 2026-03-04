@@ -58,6 +58,11 @@ fn spawn_reader_thread(
     assert!(reader_fd >= 0, "dup for reader failed");
     let mut reader = unsafe { std::fs::File::from_raw_fd(reader_fd) };
 
+    // Writer fd for responding to terminal queries (e.g. cursor position)
+    let responder_fd = unsafe { libc::dup(master_fd) };
+    assert!(responder_fd >= 0, "dup for query responder failed");
+    let mut responder = unsafe { std::fs::File::from_raw_fd(responder_fd) };
+
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -65,7 +70,19 @@ fn spawn_reader_thread(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let bytes = buf[..n].to_vec();
-                    parser.lock().unwrap().process(&bytes);
+                    let mut p = parser.lock().unwrap();
+                    p.process(&bytes);
+
+                    // Respond to Device Status Report (CSI 6 n) — cursor position query.
+                    // Programs like fzf send this to determine where to draw their UI.
+                    // Without a response, they block until timeout.
+                    if bytes.windows(4).any(|w| w == b"\x1b[6n") {
+                        let (row, col) = p.screen().cursor_position();
+                        drop(p);
+                        let response = format!("\x1b[{};{}R", row + 1, col + 1);
+                        let _ = responder.write_all(response.as_bytes());
+                    }
+
                     let _ = notify_tx.send(bytes);
                 }
             }

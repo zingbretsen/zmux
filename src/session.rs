@@ -82,6 +82,35 @@ impl SessionTree {
         id
     }
 
+    /// Find an existing project by name, returning its NodeId if found.
+    pub(crate) fn find_project_by_name(&self, name: &str) -> Option<NodeId> {
+        self.root_children.iter().find(|&&id| {
+            matches!(self.nodes.get(&id), Some(Node::Project(p)) if p.name == name)
+        }).copied()
+    }
+
+    /// Find an existing group by name under a project, returning its NodeId if found.
+    pub(crate) fn find_group_by_name(&self, project_id: NodeId, name: &str) -> Option<NodeId> {
+        if let Some(Node::Project(p)) = self.nodes.get(&project_id) {
+            p.children.iter().find(|&&id| {
+                matches!(self.nodes.get(&id), Some(Node::Group(g)) if g.name == name)
+            }).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Find an existing window by name under a group, returning its NodeId if found.
+    pub(crate) fn find_window_by_name(&self, group_id: NodeId, name: &str) -> Option<NodeId> {
+        if let Some(Node::Group(g)) = self.nodes.get(&group_id) {
+            g.children.iter().find(|&&id| {
+                matches!(self.nodes.get(&id), Some(Node::Window(w)) if w.name == name)
+            }).copied()
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn add_project(&mut self, name: String, working_dir: PathBuf) -> NodeId {
         let id = self.alloc_id();
         self.nodes.insert(id, Node::Project(ProjectNode {

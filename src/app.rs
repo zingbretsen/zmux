@@ -86,6 +86,7 @@ pub struct App {
     // Preset picker state
     pub preset_candidates: Vec<String>,
     pub preset_selected: Option<usize>,
+    pub preset_from_tree: bool,
 
     // Project/group picker dropdown state
     pub dropdown_selected: usize,
@@ -142,6 +143,7 @@ impl App {
             branch_selected: None,
             preset_candidates: Vec::new(),
             preset_selected: None,
+            preset_from_tree: false,
             dropdown_selected: 0,
             dropdown_x: 0,
             tree_data: Vec::new(),
@@ -230,12 +232,15 @@ impl App {
                         }
                     }
                 }
+                let is_fresh = self.tree_data.is_empty();
                 self.tree_data = projects;
                 self.tree_active_project = active_project;
                 self.tree_active_group = active_group;
                 self.tree_active_window = active_window;
-                // Position cursor on the currently active item
-                self.tree_cursor = self.tree_find_active_index();
+                if is_fresh {
+                    // Position cursor on the currently active item when first opening
+                    self.tree_cursor = self.tree_find_active_index();
+                }
             }
         }
     }

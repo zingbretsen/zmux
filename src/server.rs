@@ -222,22 +222,57 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
     if let Some(name) = preset_name {
         let preset = config::load_preset(name)?;
         for proj_preset in &preset.projects {
-            let project_id =
-                session.add_project(proj_preset.name.clone(), PathBuf::from(&proj_preset.path));
-            for grp_preset in &proj_preset.groups {
-                let group_dir = grp_preset.path.as_ref().map(|p| PathBuf::from(p));
-                let wt_path = grp_preset.worktree_branch.as_ref().and_then(|branch| {
-                    let proj_dir = PathBuf::from(&proj_preset.path);
-                    worktree::create(&proj_dir, branch).ok()
+            let project_id = session.find_project_by_name(&proj_preset.name)
+                .unwrap_or_else(|| {
+                    session.add_project(proj_preset.name.clone(), PathBuf::from(&proj_preset.path))
                 });
-                let working_dir = group_dir.or_else(|| wt_path.clone());
-                let group_id = session.add_group(
-                    project_id,
-                    grp_preset.name.clone(),
-                    working_dir,
-                    wt_path,
-                );
+            for grp_preset in &proj_preset.groups {
+                let group_id = if let Some(existing) = session.find_group_by_name(project_id, &grp_preset.name) {
+                    existing
+                } else {
+                    let group_dir = grp_preset.path.as_ref().map(|p| PathBuf::from(p));
+                    let wt_path = grp_preset.worktree_branch.as_ref().and_then(|branch| {
+                        let proj_dir = PathBuf::from(&proj_preset.path);
+                        worktree::create(&proj_dir, branch).ok()
+                    });
+                    let working_dir = group_dir.or_else(|| wt_path.clone());
+                    session.add_group(
+                        project_id,
+                        grp_preset.name.clone(),
+                        working_dir,
+                        wt_path,
+                    )
+                };
                 if grp_preset.windows.is_empty() {
+                    if session.find_window_by_name(group_id, "shell").is_none() {
+                        session.add_window(
+                            group_id,
+                            "shell".to_string(),
+                            default_rows,
+                            default_cols,
+                            pty_tx.clone(),
+                            None,
+                        )?;
+                    }
+                } else {
+                    for win_preset in &grp_preset.windows {
+                        if session.find_window_by_name(group_id, &win_preset.name).is_none() {
+                            session.add_window(
+                                group_id,
+                                win_preset.name.clone(),
+                                default_rows,
+                                default_cols,
+                                pty_tx.clone(),
+                                win_preset.command.clone(),
+                            )?;
+                        }
+                    }
+                }
+            }
+            if proj_preset.groups.is_empty() {
+                if session.find_group_by_name(project_id, "default").is_none() {
+                    let group_id =
+                        session.add_group(project_id, "default".to_string(), None, None);
                     session.add_window(
                         group_id,
                         "shell".to_string(),
@@ -246,30 +281,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                         pty_tx.clone(),
                         None,
                     )?;
-                } else {
-                    for win_preset in &grp_preset.windows {
-                        session.add_window(
-                            group_id,
-                            win_preset.name.clone(),
-                            default_rows,
-                            default_cols,
-                            pty_tx.clone(),
-                            win_preset.command.clone(),
-                        )?;
-                    }
                 }
-            }
-            if proj_preset.groups.is_empty() {
-                let group_id =
-                    session.add_group(project_id, "default".to_string(), None, None);
-                session.add_window(
-                    group_id,
-                    "shell".to_string(),
-                    default_rows,
-                    default_cols,
-                    pty_tx.clone(),
-                    None,
-                )?;
             }
         }
     } else {
@@ -838,50 +850,61 @@ async fn handle_client(
                         let cols = cols.saturating_sub(2);
                         let mut first_project_id = None;
                         for proj_preset in &preset.projects {
-                            let project_id = st.session.add_project(
-                                proj_preset.name.clone(),
-                                PathBuf::from(&proj_preset.path),
-                            );
+                            let project_id = st.session.find_project_by_name(&proj_preset.name)
+                                .unwrap_or_else(|| {
+                                    st.session.add_project(
+                                        proj_preset.name.clone(),
+                                        PathBuf::from(&proj_preset.path),
+                                    )
+                                });
                             if first_project_id.is_none() {
                                 first_project_id = Some(project_id);
                             }
                             for grp_preset in &proj_preset.groups {
-                                let group_dir =
-                                    grp_preset.path.as_ref().map(|p| PathBuf::from(p));
-                                let wt_path =
-                                    grp_preset.worktree_branch.as_ref().and_then(|branch| {
-                                        worktree::create(
-                                            &PathBuf::from(&proj_preset.path),
-                                            branch,
-                                        )
-                                        .ok()
-                                    });
-                                let working_dir = group_dir.or_else(|| wt_path.clone());
-                                let group_id = st.session.add_group(
-                                    project_id,
-                                    grp_preset.name.clone(),
-                                    working_dir,
-                                    wt_path,
-                                );
-                                if grp_preset.windows.is_empty() {
-                                    let _ = st.session.add_window(
-                                        group_id,
-                                        "shell".to_string(),
-                                        term_rows,
-                                        cols,
-                                        pty_tx.clone(),
-                                        None,
-                                    );
+                                let group_id = if let Some(existing) = st.session.find_group_by_name(project_id, &grp_preset.name) {
+                                    existing
                                 } else {
-                                    for win_preset in &grp_preset.windows {
+                                    let group_dir =
+                                        grp_preset.path.as_ref().map(|p| PathBuf::from(p));
+                                    let wt_path =
+                                        grp_preset.worktree_branch.as_ref().and_then(|branch| {
+                                            worktree::create(
+                                                &PathBuf::from(&proj_preset.path),
+                                                branch,
+                                            )
+                                            .ok()
+                                        });
+                                    let working_dir = group_dir.or_else(|| wt_path.clone());
+                                    st.session.add_group(
+                                        project_id,
+                                        grp_preset.name.clone(),
+                                        working_dir,
+                                        wt_path,
+                                    )
+                                };
+                                if grp_preset.windows.is_empty() {
+                                    if st.session.find_window_by_name(group_id, "shell").is_none() {
                                         let _ = st.session.add_window(
                                             group_id,
-                                            win_preset.name.clone(),
+                                            "shell".to_string(),
                                             term_rows,
                                             cols,
                                             pty_tx.clone(),
-                                            win_preset.command.clone(),
+                                            None,
                                         );
+                                    }
+                                } else {
+                                    for win_preset in &grp_preset.windows {
+                                        if st.session.find_window_by_name(group_id, &win_preset.name).is_none() {
+                                            let _ = st.session.add_window(
+                                                group_id,
+                                                win_preset.name.clone(),
+                                                term_rows,
+                                                cols,
+                                                pty_tx.clone(),
+                                                win_preset.command.clone(),
+                                            );
+                                        }
                                     }
                                 }
                             }

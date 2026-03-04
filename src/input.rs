@@ -170,6 +170,7 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.rename_buf.clear();
             app.preset_candidates.clear();
             app.preset_selected = None;
+            app.preset_from_tree = false;
             app.conn.list_presets().await?;
             app.mode = Mode::PresetInput;
         }
@@ -396,10 +397,16 @@ async fn handle_branch_input_key(app: &mut App, key: &crossterm::event::KeyEvent
 async fn handle_preset_input_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Esc => {
+            let from_tree = app.preset_from_tree;
             app.rename_buf.clear();
             app.preset_candidates.clear();
             app.preset_selected = None;
-            app.mode = Mode::Nav;
+            app.preset_from_tree = false;
+            if from_tree {
+                app.mode = Mode::TreeNav;
+            } else {
+                app.mode = Mode::Nav;
+            }
         }
         KeyCode::Enter => {
             let name = if let Some(idx) = app.preset_selected {
@@ -409,13 +416,23 @@ async fn handle_preset_input_key(app: &mut App, key: &crossterm::event::KeyEvent
                 None
             };
             let name = name.unwrap_or_else(|| app.rename_buf.clone());
+            let from_tree = app.preset_from_tree;
             if !name.is_empty() {
                 app.conn.load_preset(name).await?;
             }
             app.rename_buf.clear();
             app.preset_candidates.clear();
             app.preset_selected = None;
-            app.mode = Mode::Normal;
+            app.preset_from_tree = false;
+            if from_tree {
+                // Re-request tree to pick up newly loaded preset;
+                // the FullTree handler will position cursor on the active window
+                // (which the server set to the first window of the first preset project)
+                app.conn.request_tree().await?;
+                app.mode = Mode::TreeNav;
+            } else {
+                app.mode = Mode::Normal;
+            }
         }
         KeyCode::Down => {
             let count = app.filtered_presets().len();
@@ -730,6 +747,16 @@ async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) ->
                 // Refresh tree to update previews
                 app.conn.request_tree().await?;
             }
+        }
+
+        // Load preset (stay in tree nav after)
+        KeyCode::Char('P') => {
+            app.rename_buf.clear();
+            app.preset_candidates.clear();
+            app.preset_selected = None;
+            app.preset_from_tree = true;
+            app.conn.list_presets().await?;
+            app.mode = Mode::PresetInput;
         }
 
         // Select item and navigate
