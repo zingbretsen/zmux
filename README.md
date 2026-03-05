@@ -149,6 +149,7 @@ command = "vim"
 
 [[project.group.window]]
 name = "dev-server"
+path = "/home/user/myproject/frontend"
 command = "task web:dev"
 
 [[project.group]]

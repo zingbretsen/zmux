@@ -148,9 +148,10 @@ impl SessionTree {
         cols: u16,
         pty_output_tx: mpsc::UnboundedSender<(NodeId, Vec<u8>)>,
         command: Option<String>,
+        path_override: Option<PathBuf>,
     ) -> Result<NodeId> {
         let id = self.alloc_id();
-        let working_dir = self.window_working_dir(parent);
+        let working_dir = path_override.unwrap_or_else(|| self.window_working_dir(parent));
 
         // Collect .env vars: project dir first, then group dir overlays
         let mut env = HashMap::new();
@@ -1050,12 +1051,24 @@ impl SessionTree {
                     Some(Node::Group(g)) => g,
                     _ => return None,
                 };
+                let group_dir = self.window_working_dir(*gid);
                 let windows = g.children.iter().filter_map(|wid| {
                     match self.nodes.get(wid) {
-                        Some(Node::Window(w)) => Some(config::WindowPreset {
-                            name: w.name.clone(),
-                            command: None,
-                        }),
+                        Some(Node::Window(w)) => {
+                            let win_cwd = w.pty.cwd();
+                            let path = win_cwd.and_then(|cwd| {
+                                if cwd != group_dir {
+                                    Some(cwd.to_string_lossy().to_string())
+                                } else {
+                                    None
+                                }
+                            });
+                            Some(config::WindowPreset {
+                                name: w.name.clone(),
+                                path,
+                                command: None,
+                            })
+                        },
                         _ => None,
                     }
                 }).collect();

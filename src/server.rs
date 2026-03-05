@@ -252,6 +252,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                             default_cols,
                             pty_tx.clone(),
                             None,
+                            None,
                         )?;
                     }
                 } else {
@@ -264,6 +265,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                                 default_cols,
                                 pty_tx.clone(),
                                 win_preset.command.clone(),
+                                win_preset.path.as_ref().map(PathBuf::from),
                             )?;
                         }
                     }
@@ -279,6 +281,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                         default_rows,
                         default_cols,
                         pty_tx.clone(),
+                        None,
                         None,
                     )?;
                 }
@@ -298,6 +301,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
             default_rows,
             default_cols,
             pty_tx.clone(),
+            None,
             None,
         )?;
     }
@@ -749,6 +753,7 @@ async fn handle_client(
                         cols,
                         pty_tx.clone(),
                         None,
+                        None,
                     ) {
                         st.session.select_window(id);
                         let tab = st.session.tab_state();
@@ -775,6 +780,7 @@ async fn handle_client(
                         term_rows,
                         cols,
                         pty_tx.clone(),
+                        None,
                         None,
                     ) {
                         st.session.select_group(group_id);
@@ -805,6 +811,7 @@ async fn handle_client(
                     term_rows,
                     cols,
                     pty_tx.clone(),
+                    None,
                     None,
                 ) {
                     st.session.select_project(project_id);
@@ -884,6 +891,7 @@ async fn handle_client(
                                             cols,
                                             pty_tx.clone(),
                                             None,
+                                            None,
                                         );
                                     }
                                 } else {
@@ -896,6 +904,7 @@ async fn handle_client(
                                                 cols,
                                                 pty_tx.clone(),
                                                 win_preset.command.clone(),
+                                                win_preset.path.as_ref().map(PathBuf::from),
                                             );
                                         }
                                     }
@@ -1224,6 +1233,7 @@ async fn handle_client(
                                 term_rows,
                                 cols,
                                 pty_tx.clone(),
+                                None,
                                 None,
                             ) {
                                 st.session.select_group(group_id);

@@ -29,6 +29,7 @@ pub struct GroupPreset {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WindowPreset {
     pub name: String,
+    pub path: Option<String>,
     pub command: Option<String>,
 }
 
@@ -198,10 +199,18 @@ mod tests {
                     name: "main".into(),
                     path: None,
                     worktree_branch: Some("feature".into()),
-                    windows: vec![WindowPreset {
-                        name: "editor".into(),
-                        command: Some("vim".into()),
-                    }],
+                    windows: vec![
+                        WindowPreset {
+                            name: "editor".into(),
+                            path: Some("/home/user".into()),
+                            command: Some("vim".into()),
+                        },
+                        WindowPreset {
+                            name: "shell".into(),
+                            path: None,
+                            command: None,
+                        },
+                    ],
                 }],
             }],
         };
@@ -210,6 +219,8 @@ mod tests {
         assert_eq!(decoded.projects.len(), 1);
         assert_eq!(decoded.projects[0].groups[0].worktree_branch.as_deref(), Some("feature"));
         assert_eq!(decoded.projects[0].groups[0].windows[0].command.as_deref(), Some("vim"));
+        assert_eq!(decoded.projects[0].groups[0].windows[0].path.as_deref(), Some("/home/user"));
+        assert_eq!(decoded.projects[0].groups[0].windows[1].path, None);
     }
 
     #[test]
