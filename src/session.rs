@@ -155,6 +155,9 @@ impl SessionTree {
 
         // Collect .env vars: project dir first, then group dir overlays
         let mut env = HashMap::new();
+        // Mark child shells as running inside zmux so nested `zmux` invocations
+        // create a new project instead of launching a recursive client.
+        env.insert("ZMUX".to_string(), "1".to_string());
         if let Some(Node::Group(g)) = self.nodes.get(&parent) {
             if let Some(Node::Project(p)) = self.nodes.get(&g.parent) {
                 env.extend(config::parse_dotenv(&p.working_dir));

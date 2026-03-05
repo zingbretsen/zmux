@@ -790,9 +790,10 @@ async fn handle_client(
                     }
                 }
             }
-            ClientMsg::NewProject { name } => {
-                let cwd =
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            ClientMsg::NewProject { name, path } => {
+                let cwd = path.unwrap_or_else(||
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+                );
                 let proj_name = name.unwrap_or_else(|| {
                     cwd.file_name()
                         .map(|s| s.to_string_lossy().to_string())

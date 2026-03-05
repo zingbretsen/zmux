@@ -82,11 +82,31 @@ async fn main() -> Result<()> {
             Ok(())
         }
         _ => {
+            // If we're already inside a zmux session, create a new project
+            // instead of launching a nested client.
+            if std::env::var("ZMUX").is_ok() {
+                create_project_from_nested().await?;
+                return Ok(());
+            }
             let preset = cmd;
             ensure_server(preset).await?;
             run_client().await
         }
     }
+}
+
+/// When running inside an existing zmux session, send a NewProject command
+/// to the server so the outer client gets a new project tab.
+async fn create_project_from_nested() -> Result<()> {
+    let sock_path = protocol::socket_path();
+    let stream = tokio::net::UnixStream::connect(&sock_path).await?;
+    let (reader, mut writer) = tokio::io::split(stream);
+    let _ = reader;
+    let cwd = std::env::current_dir().ok();
+    let name = cwd.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string());
+    protocol::write_msg(&mut writer, &protocol::ClientMsg::NewProject { name, path: cwd }).await?;
+    println!("Created new zmux project");
+    Ok(())
 }
 
 async fn ensure_server(preset: Option<&str>) -> Result<()> {

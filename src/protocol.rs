@@ -314,7 +314,7 @@ pub enum ClientMsg {
     /// Create a new group in the active project
     NewGroup { name: Option<String> },
     /// Create a new project
-    NewProject { name: Option<String> },
+    NewProject { name: Option<String>, path: Option<std::path::PathBuf> },
     /// Request current state (sent on connect)
     Subscribe,
     /// Load a preset
