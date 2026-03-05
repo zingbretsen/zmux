@@ -199,4 +199,16 @@ impl ClientConnection {
     pub async fn request_tree(&self) -> Result<()> {
         self.send(ClientMsg::RequestTree).await
     }
+
+    pub async fn list_env_profiles(&self) -> Result<()> {
+        self.send(ClientMsg::ListEnvProfiles).await
+    }
+
+    pub async fn set_env_profile(&self, scope: NodeId, profile: Option<String>) -> Result<()> {
+        self.send(ClientMsg::SetEnvProfile { scope, profile }).await
+    }
+
+    pub async fn source_env_profile(&self, profile: String) -> Result<()> {
+        self.send(ClientMsg::SourceEnvProfile { profile }).await
+    }
 }

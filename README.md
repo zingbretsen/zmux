@@ -57,6 +57,8 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `o` / `O` | Cycle pane content globally (across all groups/projects) |
 | `Ctrl+H/J/K/L` | Move focus between panes (tiled mode only) |
 | `Shift+Arrow` | Resize active pane |
+| `e` | Set env profile for focused tab level (type to filter, ↑/↓ to select) |
+| `E` | Source env profile into active window's running shell |
 | `u` | Hot reload server binary (upgrade in place) |
 | `f` | Open session tree navigator (with preview) |
 | `?` | Show help overlay |
@@ -159,6 +161,39 @@ worktree_branch = "feature-branch"
 [[project.group.window]]
 name = "shell"
 ```
+
+## Env Profiles
+
+Env profiles are `.env` files stored in:
+
+- **macOS**: `~/Library/Application Support/zmux/envs/`
+- **Linux**: `~/.config/zmux/envs/`
+
+Create a profile by adding a `.env` file (e.g., `prod.env`):
+
+```
+DATABASE_URL=postgres://prod-host/mydb
+API_KEY=secret123
+```
+
+**Setting profiles (new windows)**: In nav mode, press `e` to set an env profile for the focused tab level (project/group/window). New windows spawned in that scope will inherit the profile's variables at process startup (invisible to the shell).
+
+**Sourcing into running shells**: Press `E` to source a profile into the active window's running shell via `set -a; source <path>; set +a`. This will be visible in the terminal.
+
+**Preset support**: Presets can specify a default env profile at any level:
+
+```toml
+[[project]]
+name = "myapp"
+path = "/home/user/myapp"
+env_profile = "dev"
+
+[[project.group]]
+name = "staging"
+env_profile = "staging"
+```
+
+Layering order: directory `.env` files < project profile < group profile < window profile.
 
 ## Features
 

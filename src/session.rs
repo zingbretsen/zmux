@@ -21,6 +21,7 @@ pub(crate) struct ProjectNode {
     pub(crate) name: String,
     pub(crate) working_dir: PathBuf,
     pub(crate) children: Vec<NodeId>,
+    pub(crate) env_profile: Option<String>,
 }
 
 pub(crate) struct GroupNode {
@@ -38,6 +39,7 @@ pub(crate) struct GroupNode {
     pub(crate) next_pane_id: u32,
     /// Which pane is currently focused
     pub(crate) active_pane: Option<u32>,
+    pub(crate) env_profile: Option<String>,
 }
 
 pub(crate) struct WindowNode {
@@ -46,6 +48,7 @@ pub(crate) struct WindowNode {
     pub(crate) pty: PtyHandle,
     pub(crate) ai_status: Option<AiStatus>,
     pub(crate) last_cpu_time: u64,
+    pub(crate) env_profile: Option<String>,
 }
 
 pub(crate) enum Node {
@@ -113,7 +116,7 @@ impl SessionTree {
     pub(crate) fn add_project(&mut self, name: String, working_dir: PathBuf) -> NodeId {
         let id = self.alloc_id();
         self.nodes.insert(id, Node::Project(ProjectNode {
-            name, working_dir, children: Vec::new(),
+            name, working_dir, children: Vec::new(), env_profile: None,
         }));
         self.root_children.push(id);
         if self.active_project.is_none() {
@@ -130,6 +133,7 @@ impl SessionTree {
             split_tree: None,
             next_pane_id: 0,
             active_pane: None,
+            env_profile: None,
         }));
         if let Some(Node::Project(p)) = self.nodes.get_mut(&parent) {
             p.children.push(id);
@@ -149,11 +153,12 @@ impl SessionTree {
         pty_output_tx: mpsc::UnboundedSender<(NodeId, Vec<u8>)>,
         command: Option<String>,
         path_override: Option<PathBuf>,
+        env_profile: Option<String>,
     ) -> Result<NodeId> {
         let id = self.alloc_id();
         let working_dir = path_override.unwrap_or_else(|| self.window_working_dir(parent));
 
-        // Collect .env vars: project dir first, then group dir overlays
+        // Collect .env vars: directory .env first, then named env profiles overlay
         let mut env = HashMap::new();
         // Mark child shells as running inside zmux so nested `zmux` invocations
         // create a new project instead of launching a recursive client.
@@ -161,9 +166,28 @@ impl SessionTree {
         if let Some(Node::Group(g)) = self.nodes.get(&parent) {
             if let Some(Node::Project(p)) = self.nodes.get(&g.parent) {
                 env.extend(config::parse_dotenv(&p.working_dir));
+                // Layer project env profile
+                if let Some(ref profile) = p.env_profile {
+                    if let Ok(profile_env) = config::load_env_profile(profile) {
+                        env.extend(profile_env);
+                    }
+                }
             }
             if let Some(ref wd) = g.working_dir {
                 env.extend(config::parse_dotenv(wd));
+            }
+            // Layer group env profile
+            if let Some(ref profile) = g.env_profile {
+                if let Ok(profile_env) = config::load_env_profile(profile) {
+                    env.extend(profile_env);
+                }
+            }
+        }
+        // Layer window-level env profile (explicit or inherited)
+        let effective_profile = env_profile.or_else(|| self.resolve_env_profile(parent));
+        if let Some(ref profile) = effective_profile {
+            if let Ok(profile_env) = config::load_env_profile(profile) {
+                env.extend(profile_env);
             }
         }
 
@@ -186,7 +210,7 @@ impl SessionTree {
             let _ = pty_output_tx.send((win_id, Vec::new()));
         });
 
-        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty, ai_status: None, last_cpu_time: 0 }));
+        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty, ai_status: None, last_cpu_time: 0, env_profile: effective_profile }));
         if let Some(Node::Group(g)) = self.nodes.get_mut(&parent) {
             g.children.push(id);
         }
@@ -1042,6 +1066,61 @@ impl SessionTree {
         }
     }
 
+    /// Set env profile on a node
+    pub(crate) fn set_env_profile(&mut self, node_id: NodeId, profile: Option<String>) {
+        match self.nodes.get_mut(&node_id) {
+            Some(Node::Project(p)) => p.env_profile = profile,
+            Some(Node::Group(g)) => g.env_profile = profile,
+            Some(Node::Window(w)) => w.env_profile = profile,
+            None => {}
+        }
+    }
+
+    /// Resolve env profile by walking up the tree to find the nearest one
+    pub(crate) fn resolve_env_profile(&self, node_id: NodeId) -> Option<String> {
+        match self.nodes.get(&node_id) {
+            Some(Node::Window(w)) => {
+                w.env_profile.clone().or_else(|| self.resolve_env_profile(w.parent))
+            }
+            Some(Node::Group(g)) => {
+                g.env_profile.clone().or_else(|| self.resolve_env_profile(g.parent))
+            }
+            Some(Node::Project(p)) => p.env_profile.clone(),
+            None => None,
+        }
+    }
+
+    /// Collect all window IDs under a node (project or group)
+    #[allow(dead_code)]
+    pub(crate) fn windows_in_scope(&self, node_id: NodeId) -> Vec<NodeId> {
+        match self.nodes.get(&node_id) {
+            Some(Node::Window(_)) => vec![node_id],
+            Some(Node::Group(g)) => g.children.clone(),
+            Some(Node::Project(p)) => {
+                p.children.iter().flat_map(|gid| {
+                    match self.nodes.get(gid) {
+                        Some(Node::Group(g)) => g.children.clone(),
+                        _ => Vec::new(),
+                    }
+                }).collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Source an env profile file into a running PTY
+    pub(crate) fn source_env_profile(&mut self, window_id: NodeId, profile: &str) -> Result<()> {
+        let path = config::env_profile_path(profile);
+        if !path.exists() {
+            anyhow::bail!("Env profile '{}' not found", profile);
+        }
+        if let Some(Node::Window(w)) = self.nodes.get_mut(&window_id) {
+            let cmd = format!("set -a; source '{}'; set +a\n", path.display());
+            w.pty.write(cmd.as_bytes())?;
+        }
+        Ok(())
+    }
+
     /// Convert current session tree to a Preset for saving
     pub(crate) fn to_preset(&self) -> config::Preset {
         let projects = self.root_children.iter().filter_map(|pid| {
@@ -1070,6 +1149,7 @@ impl SessionTree {
                                 name: w.name.clone(),
                                 path,
                                 command: None,
+                                env_profile: w.env_profile.clone(),
                             })
                         },
                         _ => None,
@@ -1081,12 +1161,14 @@ impl SessionTree {
                     worktree_branch: g.worktree_path.as_ref().and_then(|wt| {
                         wt.file_name().map(|n| n.to_string_lossy().to_string())
                     }),
+                    env_profile: g.env_profile.clone(),
                     windows,
                 })
             }).collect();
             Some(config::ProjectPreset {
                 name: p.name.clone(),
                 path: p.working_dir.to_string_lossy().to_string(),
+                env_profile: p.env_profile.clone(),
                 groups,
             })
         }).collect();

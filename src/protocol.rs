@@ -379,6 +379,12 @@ pub enum ClientMsg {
     Shutdown,
     /// Hot reload: server serializes state, exec()s new binary
     Reload,
+    /// List available env profiles
+    ListEnvProfiles,
+    /// Set env profile on a node and optionally source it in running windows
+    SetEnvProfile { scope: NodeId, profile: Option<String> },
+    /// Source an env profile into the active window's running shell
+    SourceEnvProfile { profile: String },
 }
 
 // Server → Client
@@ -412,6 +418,8 @@ pub enum ServerMsg {
     PresetList { presets: Vec<String> },
     /// Preset already exists; client should confirm overwrite
     ConfirmOverwrite { name: String },
+    /// List of available env profiles
+    EnvProfileList { profiles: Vec<String> },
     /// Server is about to exec() for hot reload; clients should reconnect
     Reloading,
     /// Full session tree (for tree nav)

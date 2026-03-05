@@ -20,6 +20,7 @@ pub enum Mode {
     ProjectPicker,
     GroupPicker,
     ConfirmOverwrite,
+    EnvProfilePicker,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -105,6 +106,12 @@ pub struct App {
 
     // Overwrite confirmation state
     pub overwrite_preset_name: Option<String>,
+
+    // Env profile picker state
+    pub env_profile_candidates: Vec<String>,
+    pub env_profile_selected: Option<usize>,
+    /// If true, source the profile into the active window's running shell
+    pub env_profile_source: bool,
 }
 
 impl App {
@@ -157,6 +164,9 @@ impl App {
             tree_active_window: None,
             tree_parsers: HashMap::new(),
             overwrite_preset_name: None,
+            env_profile_candidates: Vec::new(),
+            env_profile_selected: None,
+            env_profile_source: false,
         })
     }
 
@@ -217,6 +227,10 @@ impl App {
             ServerMsg::ConfirmOverwrite { name } => {
                 self.overwrite_preset_name = Some(name);
                 self.mode = Mode::ConfirmOverwrite;
+            }
+            ServerMsg::EnvProfileList { profiles } => {
+                self.env_profile_candidates = profiles;
+                self.env_profile_selected = None;
             }
             ServerMsg::Reloading => {
                 self.status_message = Some(("Server reloading...".to_string(), Instant::now()));
@@ -341,6 +355,16 @@ impl App {
             .iter()
             .filter(|b| query.is_empty() || b.to_lowercase().contains(&query))
             .map(|b| b.as_str())
+            .collect()
+    }
+
+    /// Get env profile candidates filtered by current input.
+    pub fn filtered_env_profiles(&self) -> Vec<&str> {
+        let query = self.rename_buf.to_lowercase();
+        self.env_profile_candidates
+            .iter()
+            .filter(|p| query.is_empty() || p.to_lowercase().contains(&query))
+            .map(|p| p.as_str())
             .collect()
     }
 

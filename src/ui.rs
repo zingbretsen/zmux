@@ -56,6 +56,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::PresetInput) {
         draw_preset_picker(f, app, area);
     }
+    if matches!(app.mode, Mode::EnvProfilePicker) {
+        draw_env_profile_picker(f, app, area);
+    }
     if matches!(app.mode, Mode::TreeNav) {
         draw_tree_nav(f, app, area);
     }
@@ -128,6 +131,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
  W       Save preset        L       Load preset
  w       New worktree group X       Close group
  R       Rebase onto main   M       Merge into main
+ e       Set env profile    E       Source env profile
  t       Toggle tiled       v       Vertical split
  -       Horizontal split   T       Swap split direction
  m       Close pane         n/N     Cycle pane (group)
@@ -264,6 +268,63 @@ fn draw_preset_picker(f: &mut Frame, app: &App, area: Rect) {
             let is_selected = app.preset_selected == Some(actual_idx);
             let style = if is_selected {
                 Style::default().fg(Color::Black).bg(Color::Yellow).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(format!(" {} ", name), style))
+        })
+        .collect();
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
+}
+
+fn draw_env_profile_picker(f: &mut Frame, app: &App, area: Rect) {
+    let filtered = app.filtered_env_profiles();
+    if filtered.is_empty() {
+        return;
+    }
+
+    let max_visible = 10usize;
+    let visible_count = filtered.len().min(max_visible);
+    let height = (visible_count as u16 + 2).min(area.height);
+    let width = filtered.iter().map(|p| p.len()).max().unwrap_or(10).max(20) as u16 + 4;
+    let width = width.min(area.width);
+
+    let x = area.x + 2;
+    let y = area.y + 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+    let title = if app.env_profile_source { " Source Env " } else { " Env Profiles " };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(title);
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let scroll_offset = if let Some(sel) = app.env_profile_selected {
+        if sel >= max_visible {
+            sel - max_visible + 1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = filtered
+        .iter()
+        .skip(scroll_offset)
+        .take(max_visible)
+        .enumerate()
+        .map(|(i, name)| {
+            let actual_idx = i + scroll_offset;
+            let is_selected = app.env_profile_selected == Some(actual_idx);
+            let style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Green).bold()
             } else {
                 Style::default().fg(Color::White)
             };
@@ -582,6 +643,15 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     if matches!(app.mode, Mode::PresetInput) {
         let line = Line::from(vec![
             Span::styled(" preset: ", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    if matches!(app.mode, Mode::EnvProfilePicker) {
+        let label = if app.env_profile_source { " source env: " } else { " env profile: " };
+        let line = Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Green).bold()),
             Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
         ]);
         f.render_widget(Paragraph::new(line), area);

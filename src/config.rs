@@ -13,6 +13,8 @@ pub struct Preset {
 pub struct ProjectPreset {
     pub name: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_profile: Option<String>,
     #[serde(rename = "group", default)]
     pub groups: Vec<GroupPreset>,
 }
@@ -22,6 +24,8 @@ pub struct GroupPreset {
     pub name: String,
     pub path: Option<String>,
     pub worktree_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_profile: Option<String>,
     #[serde(rename = "window", default)]
     pub windows: Vec<WindowPreset>,
 }
@@ -31,6 +35,8 @@ pub struct WindowPreset {
     pub name: String,
     pub path: Option<String>,
     pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_profile: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -52,6 +58,42 @@ pub fn load_config() -> Config {
 fn presets_dir() -> PathBuf {
     let config = dirs_or_default();
     config.join("presets")
+}
+
+fn envs_dir() -> PathBuf {
+    let config = dirs_or_default();
+    config.join("envs")
+}
+
+pub fn env_profile_path(name: &str) -> PathBuf {
+    envs_dir().join(format!("{}.env", name))
+}
+
+pub fn list_env_profiles() -> Result<Vec<String>> {
+    let dir = envs_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut profiles = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "env") {
+            if let Some(stem) = path.file_stem() {
+                profiles.push(stem.to_string_lossy().to_string());
+            }
+        }
+    }
+    profiles.sort();
+    Ok(profiles)
+}
+
+pub fn load_env_profile(name: &str) -> Result<HashMap<String, String>> {
+    let path = env_profile_path(name);
+    if !path.exists() {
+        anyhow::bail!("Env profile '{}' not found", name);
+    }
+    Ok(parse_dotenv_file(&path))
 }
 
 fn dirs_or_default() -> PathBuf {
@@ -113,8 +155,12 @@ pub fn save_preset(name: &str, preset: &Preset) -> Result<()> {
 
 /// Parse a .env file from the given directory. Returns empty map if no .env exists.
 pub fn parse_dotenv(dir: &Path) -> HashMap<String, String> {
-    let path = dir.join(".env");
-    let content = match std::fs::read_to_string(&path) {
+    parse_dotenv_file(&dir.join(".env"))
+}
+
+/// Parse a .env file at the given path. Returns empty map if file doesn't exist.
+pub fn parse_dotenv_file(path: &Path) -> HashMap<String, String> {
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return HashMap::new(),
     };
@@ -125,6 +171,8 @@ pub fn parse_dotenv(dir: &Path) -> HashMap<String, String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        // Strip optional 'export ' prefix
+        let line = line.strip_prefix("export ").unwrap_or(line);
         if let Some((key, val)) = line.split_once('=') {
             let key = key.trim().to_string();
             let val = val.trim();
@@ -195,20 +243,24 @@ mod tests {
             projects: vec![ProjectPreset {
                 name: "myproj".into(),
                 path: "/tmp".into(),
+                env_profile: Some("prod".into()),
                 groups: vec![GroupPreset {
                     name: "main".into(),
                     path: None,
                     worktree_branch: Some("feature".into()),
+                    env_profile: None,
                     windows: vec![
                         WindowPreset {
                             name: "editor".into(),
                             path: Some("/home/user".into()),
                             command: Some("vim".into()),
+                            env_profile: Some("dev".into()),
                         },
                         WindowPreset {
                             name: "shell".into(),
                             path: None,
                             command: None,
+                            env_profile: None,
                         },
                     ],
                 }],
@@ -221,6 +273,9 @@ mod tests {
         assert_eq!(decoded.projects[0].groups[0].windows[0].command.as_deref(), Some("vim"));
         assert_eq!(decoded.projects[0].groups[0].windows[0].path.as_deref(), Some("/home/user"));
         assert_eq!(decoded.projects[0].groups[0].windows[1].path, None);
+        assert_eq!(decoded.projects[0].env_profile.as_deref(), Some("prod"));
+        assert_eq!(decoded.projects[0].groups[0].env_profile, None);
+        assert_eq!(decoded.projects[0].groups[0].windows[0].env_profile.as_deref(), Some("dev"));
     }
 
     #[test]

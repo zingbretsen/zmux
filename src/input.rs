@@ -30,6 +30,7 @@ pub async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         Mode::TreeNav => handle_tree_nav_key(app, key).await,
         Mode::ProjectPicker | Mode::GroupPicker => handle_picker_key(app, key).await,
         Mode::ConfirmOverwrite => handle_confirm_overwrite_key(app, key).await,
+        Mode::EnvProfilePicker => handle_env_profile_picker_key(app, key).await,
     }
 }
 
@@ -190,6 +191,26 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.preset_from_tree = false;
             app.conn.list_presets().await?;
             app.mode = Mode::PresetInput;
+        }
+
+        // Set env profile for the focused tab level
+        KeyCode::Char('e') => {
+            app.rename_buf.clear();
+            app.env_profile_candidates.clear();
+            app.env_profile_selected = None;
+            app.env_profile_source = false;
+            app.conn.list_env_profiles().await?;
+            app.mode = Mode::EnvProfilePicker;
+        }
+
+        // Source env profile into the active window's running shell
+        KeyCode::Char('E') => {
+            app.rename_buf.clear();
+            app.env_profile_candidates.clear();
+            app.env_profile_selected = None;
+            app.env_profile_source = true;
+            app.conn.list_env_profiles().await?;
+            app.mode = Mode::EnvProfilePicker;
         }
 
         // Worktree: new group from branch
@@ -498,6 +519,79 @@ async fn handle_preset_input_key(app: &mut App, key: &crossterm::event::KeyEvent
         KeyCode::Char(c) => {
             app.rename_buf.push(c);
             app.preset_selected = None;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_env_profile_picker_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            app.rename_buf.clear();
+            app.env_profile_candidates.clear();
+            app.env_profile_selected = None;
+            app.mode = Mode::Nav;
+        }
+        KeyCode::Enter => {
+            let filtered = app.filtered_env_profiles();
+            let name = if let Some(idx) = app.env_profile_selected {
+                filtered.get(idx).map(|s| s.to_string())
+            } else {
+                filtered.first().map(|s| s.to_string())
+            };
+            if let Some(name) = name {
+                if app.env_profile_source {
+                    // Source into active window's running shell
+                    app.conn.source_env_profile(name).await?;
+                } else {
+                    // Set as default for the focused tab level
+                    let scope = match app.tab_focus {
+                        TabLevel::Project => app.active_project,
+                        TabLevel::Group => app.active_group,
+                        TabLevel::Window => app.active_window,
+                    };
+                    if let Some(id) = scope {
+                        app.conn.set_env_profile(id, Some(name)).await?;
+                    }
+                }
+            }
+            app.rename_buf.clear();
+            app.env_profile_candidates.clear();
+            app.env_profile_selected = None;
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Down => {
+            let count = app.filtered_env_profiles().len();
+            if count > 0 {
+                app.env_profile_selected = Some(match app.env_profile_selected {
+                    None => 0,
+                    Some(i) => (i + 1).min(count - 1),
+                });
+            }
+        }
+        KeyCode::Up => {
+            app.env_profile_selected = match app.env_profile_selected {
+                None | Some(0) => None,
+                Some(i) => Some(i - 1),
+            };
+        }
+        KeyCode::Tab => {
+            if let Some(idx) = app.env_profile_selected {
+                let filtered = app.filtered_env_profiles();
+                if let Some(name) = filtered.get(idx) {
+                    app.rename_buf = name.to_string();
+                    app.env_profile_selected = None;
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            app.rename_buf.pop();
+            app.env_profile_selected = None;
+        }
+        KeyCode::Char(c) => {
+            app.rename_buf.push(c);
+            app.env_profile_selected = None;
         }
         _ => {}
     }

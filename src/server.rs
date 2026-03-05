@@ -40,6 +40,8 @@ enum SerializedNode {
         name: String,
         working_dir: String,
         children: Vec<NodeId>,
+        #[serde(default)]
+        env_profile: Option<String>,
     },
     Group {
         name: String,
@@ -51,6 +53,8 @@ enum SerializedNode {
         split_tree: Option<protocol::SplitTree>,
         next_pane_id: u32,
         active_pane: Option<u32>,
+        #[serde(default)]
+        env_profile: Option<String>,
     },
     Window {
         name: String,
@@ -60,6 +64,8 @@ enum SerializedNode {
         rows: u16,
         cols: u16,
         screen_dump: Vec<u8>,
+        #[serde(default)]
+        env_profile: Option<String>,
     },
 }
 
@@ -226,6 +232,9 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                 .unwrap_or_else(|| {
                     session.add_project(proj_preset.name.clone(), PathBuf::from(&proj_preset.path))
                 });
+            if proj_preset.env_profile.is_some() {
+                session.set_env_profile(project_id, proj_preset.env_profile.clone());
+            }
             for grp_preset in &proj_preset.groups {
                 let group_id = if let Some(existing) = session.find_group_by_name(project_id, &grp_preset.name) {
                     existing
@@ -243,6 +252,9 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                         wt_path,
                     )
                 };
+                if grp_preset.env_profile.is_some() {
+                    session.set_env_profile(group_id, grp_preset.env_profile.clone());
+                }
                 if grp_preset.windows.is_empty() {
                     if session.find_window_by_name(group_id, "shell").is_none() {
                         session.add_window(
@@ -251,6 +263,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                             default_rows,
                             default_cols,
                             pty_tx.clone(),
+                            None,
                             None,
                             None,
                         )?;
@@ -266,6 +279,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                                 pty_tx.clone(),
                                 win_preset.command.clone(),
                                 win_preset.path.as_ref().map(PathBuf::from),
+                                win_preset.env_profile.clone(),
                             )?;
                         }
                     }
@@ -281,6 +295,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                         default_rows,
                         default_cols,
                         pty_tx.clone(),
+                        None,
                         None,
                         None,
                     )?;
@@ -301,6 +316,7 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
             default_rows,
             default_cols,
             pty_tx.clone(),
+            None,
             None,
             None,
         )?;
@@ -386,6 +402,7 @@ fn serialize_state(
                 name: p.name.clone(),
                 working_dir: p.working_dir.to_string_lossy().to_string(),
                 children: p.children.clone(),
+                env_profile: p.env_profile.clone(),
             },
             Node::Group(g) => SerializedNode::Group {
                 name: g.name.clone(),
@@ -400,6 +417,7 @@ fn serialize_state(
                 split_tree: g.split_tree.clone(),
                 next_pane_id: g.next_pane_id,
                 active_pane: g.active_pane,
+                env_profile: g.env_profile.clone(),
             },
             Node::Window(_) => continue,
         };
@@ -427,6 +445,7 @@ fn serialize_state(
                     rows,
                     cols,
                     screen_dump,
+                    env_profile: w.env_profile.clone(),
                 },
             ));
         }
@@ -547,10 +566,12 @@ fn restore_session(
                 name,
                 working_dir,
                 children,
+                env_profile,
             } => Node::Project(ProjectNode {
                 name,
                 working_dir: PathBuf::from(working_dir),
                 children,
+                env_profile,
             }),
             SerializedNode::Group {
                 name,
@@ -562,6 +583,7 @@ fn restore_session(
                 split_tree,
                 next_pane_id,
                 active_pane,
+                env_profile,
             } => Node::Group(GroupNode {
                 name,
                 parent,
@@ -572,6 +594,7 @@ fn restore_session(
                 split_tree,
                 next_pane_id,
                 active_pane,
+                env_profile,
             }),
             SerializedNode::Window {
                 name,
@@ -581,6 +604,7 @@ fn restore_session(
                 rows,
                 cols,
                 screen_dump,
+                env_profile,
             } => {
                 set_cloexec(master_fd)?;
                 let pty = PtyHandle::from_raw_parts(
@@ -598,6 +622,7 @@ fn restore_session(
                     pty,
                     ai_status: None,
                     last_cpu_time: 0,
+                    env_profile,
                 })
             }
         };
@@ -754,6 +779,7 @@ async fn handle_client(
                         pty_tx.clone(),
                         None,
                         None,
+                        None,
                     ) {
                         st.session.select_window(id);
                         let tab = st.session.tab_state();
@@ -780,6 +806,7 @@ async fn handle_client(
                         term_rows,
                         cols,
                         pty_tx.clone(),
+                        None,
                         None,
                         None,
                     ) {
@@ -812,6 +839,7 @@ async fn handle_client(
                     term_rows,
                     cols,
                     pty_tx.clone(),
+                    None,
                     None,
                     None,
                 ) {
@@ -858,6 +886,9 @@ async fn handle_client(
                                         PathBuf::from(&proj_preset.path),
                                     )
                                 });
+                            if proj_preset.env_profile.is_some() {
+                                st.session.set_env_profile(project_id, proj_preset.env_profile.clone());
+                            }
                             if first_project_id.is_none() {
                                 first_project_id = Some(project_id);
                             }
@@ -883,6 +914,9 @@ async fn handle_client(
                                         wt_path,
                                     )
                                 };
+                                if grp_preset.env_profile.is_some() {
+                                    st.session.set_env_profile(group_id, grp_preset.env_profile.clone());
+                                }
                                 if grp_preset.windows.is_empty() {
                                     if st.session.find_window_by_name(group_id, "shell").is_none() {
                                         let _ = st.session.add_window(
@@ -891,6 +925,7 @@ async fn handle_client(
                                             term_rows,
                                             cols,
                                             pty_tx.clone(),
+                                            None,
                                             None,
                                             None,
                                         );
@@ -906,6 +941,7 @@ async fn handle_client(
                                                 pty_tx.clone(),
                                                 win_preset.command.clone(),
                                                 win_preset.path.as_ref().map(PathBuf::from),
+                                                win_preset.env_profile.clone(),
                                             );
                                         }
                                     }
@@ -1236,6 +1272,7 @@ async fn handle_client(
                                 pty_tx.clone(),
                                 None,
                                 None,
+                                None,
                             ) {
                                 st.session.select_group(group_id);
                                 st.session.select_window(wid);
@@ -1525,6 +1562,43 @@ async fn handle_client(
                 drop(st);
                 trigger_reload();
                 break;
+            }
+            ClientMsg::ListEnvProfiles => {
+                match config::list_env_profiles() {
+                    Ok(profiles) => {
+                        let _ = client_tx.send(ServerMsg::EnvProfileList { profiles });
+                    }
+                    Err(e) => {
+                        let _ = client_tx.send(ServerMsg::Error {
+                            message: format!("Failed to list env profiles: {}", e),
+                        });
+                    }
+                }
+            }
+            ClientMsg::SetEnvProfile { scope, profile } => {
+                st.session.set_env_profile(scope, profile.clone());
+                let profile_desc = profile.as_deref().unwrap_or("none");
+                let _ = client_tx.send(ServerMsg::Info {
+                    message: format!("Env profile set to: {}", profile_desc),
+                });
+                let tab = st.session.tab_state();
+                st.broadcast(tab);
+            }
+            ClientMsg::SourceEnvProfile { profile } => {
+                if let Some(wid) = st.session.active_window {
+                    match st.session.source_env_profile(wid, &profile) {
+                        Ok(_) => {
+                            let _ = client_tx.send(ServerMsg::Info {
+                                message: format!("Sourced env profile: {}", profile),
+                            });
+                        }
+                        Err(e) => {
+                            let _ = client_tx.send(ServerMsg::Error {
+                                message: format!("Failed to source env: {}", e),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
