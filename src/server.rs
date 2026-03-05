@@ -1,7 +1,7 @@
 use crate::config;
 use crate::protocol::{self, ClientMsg, LayoutMode, NodeId, ServerMsg};
 use crate::pty::PtyHandle;
-use crate::session::{GroupNode, Node, ProjectNode, SessionTree, WindowNode};
+use crate::session::{build_layout_tree, GroupNode, Node, ProjectNode, SessionTree, WindowNode};
 use crate::worktree;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,30 @@ use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
+
+// ── Lifecycle hooks ───────────────────────────────────────────────────
+
+async fn run_hook(command: &str, working_dir: &std::path::Path) {
+    use tokio::process::Command;
+    match Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(working_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+    {
+        Ok(status) if !status.success() => {
+            warn!("Hook failed (exit {}): {}", status.code().unwrap_or(-1), command);
+        }
+        Err(e) => {
+            warn!("Hook failed to execute: {} — {}", command, e);
+        }
+        _ => {}
+    }
+}
 
 // ── Serializable reload state ─────────────────────────────────────────
 
@@ -42,6 +66,8 @@ enum SerializedNode {
         children: Vec<NodeId>,
         #[serde(default)]
         env_profile: Option<String>,
+        #[serde(default)]
+        on_project_stop: Option<String>,
     },
     Group {
         name: String,
@@ -55,6 +81,8 @@ enum SerializedNode {
         active_pane: Option<u32>,
         #[serde(default)]
         env_profile: Option<String>,
+        #[serde(default)]
+        layout_preset: Option<config::LayoutPreset>,
     },
     Window {
         name: String,
@@ -66,6 +94,8 @@ enum SerializedNode {
         screen_dump: Vec<u8>,
         #[serde(default)]
         env_profile: Option<String>,
+        #[serde(default)]
+        on_pane_close: Option<String>,
     },
 }
 
@@ -106,6 +136,15 @@ fn spawn_pty_forwarder(
         while let Some((window_id, data)) = pty_rx.recv().await {
             if data.is_empty() {
                 let mut st = state.lock().await;
+                // Extract on_pane_close hook before removing
+                let hook_info = if let Some(Node::Window(w)) = st.session.nodes.get(&window_id) {
+                    w.on_pane_close.as_ref().map(|cmd| {
+                        let dir = st.session.window_working_dir(w.parent);
+                        (cmd.clone(), dir)
+                    })
+                } else {
+                    None
+                };
                 st.session.remove_window(window_id);
                 let tab = st.session.tab_state();
                 st.broadcast(tab);
@@ -116,6 +155,11 @@ fn spawn_pty_forwarder(
                             data,
                         });
                     }
+                }
+                // Fire on_pane_close hook (fire-and-forget)
+                if let Some((cmd, dir)) = hook_info {
+                    drop(st);
+                    tokio::spawn(async move { run_hook(&cmd, &dir).await });
                 }
                 continue;
             }
@@ -228,9 +272,22 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
     if let Some(name) = preset_name {
         let preset = config::load_preset(name)?;
         for proj_preset in &preset.projects {
+            let proj_dir = PathBuf::from(&proj_preset.path);
+            // Run lifecycle hooks before creating windows
+            if let Some(ref cmd) = proj_preset.on_project_start {
+                run_hook(cmd, &proj_dir).await;
+            }
+            if config::is_first_start(&proj_preset.name) {
+                if let Some(ref cmd) = proj_preset.on_project_first_start {
+                    run_hook(cmd, &proj_dir).await;
+                }
+            } else if let Some(ref cmd) = proj_preset.on_project_restart {
+                run_hook(cmd, &proj_dir).await;
+            }
+
             let project_id = session.find_project_by_name(&proj_preset.name)
                 .unwrap_or_else(|| {
-                    session.add_project(proj_preset.name.clone(), PathBuf::from(&proj_preset.path))
+                    session.add_project(proj_preset.name.clone(), proj_dir.clone())
                 });
             if proj_preset.env_profile.is_some() {
                 session.set_env_profile(project_id, proj_preset.env_profile.clone());
@@ -255,9 +312,10 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                 if grp_preset.env_profile.is_some() {
                     session.set_env_profile(group_id, grp_preset.env_profile.clone());
                 }
+                let mut group_window_ids = Vec::new();
                 if grp_preset.windows.is_empty() {
                     if session.find_window_by_name(group_id, "shell").is_none() {
-                        session.add_window(
+                        let wid = session.add_window(
                             group_id,
                             "shell".to_string(),
                             default_rows,
@@ -266,12 +324,15 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                             None,
                             None,
                             None,
+                            proj_preset.pre_window.clone(),
+                            None,
                         )?;
+                        group_window_ids.push(wid);
                     }
                 } else {
                     for win_preset in &grp_preset.windows {
                         if session.find_window_by_name(group_id, &win_preset.name).is_none() {
-                            session.add_window(
+                            let wid = session.add_window(
                                 group_id,
                                 win_preset.name.clone(),
                                 default_rows,
@@ -280,9 +341,68 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                                 win_preset.command.clone(),
                                 win_preset.path.as_ref().map(PathBuf::from),
                                 win_preset.env_profile.clone(),
+                                proj_preset.pre_window.clone(),
+                                win_preset.on_pane_close.clone(),
                             )?;
+                            // Write on_pane_open after command
+                            if let Some(ref hook) = win_preset.on_pane_open {
+                                if let Some(Node::Window(w)) = session.nodes.get_mut(&wid) {
+                                    let _ = w.pty.write(format!("{}\n", hook).as_bytes());
+                                }
+                            }
+                            group_window_ids.push(wid);
                         }
                     }
+                }
+                // Apply layout preset if specified
+                if let Some(ref layout) = grp_preset.layout {
+                    if let Some(Node::Group(g)) = session.nodes.get_mut(&group_id) {
+                        let window_ids: Vec<NodeId> = g.children.clone();
+                        if window_ids.len() > 1 {
+                            let panes: Vec<(u32, NodeId)> = window_ids.iter().enumerate()
+                                .map(|(i, &wid)| (i as u32, wid)).collect();
+                            g.layout_mode = LayoutMode::Tiled;
+                            g.split_tree = build_layout_tree(&panes, layout);
+                            g.next_pane_id = panes.len() as u32;
+                            g.active_pane = Some(0);
+                            g.layout_preset = Some(layout.clone());
+                        } else if window_ids.len() == 1 {
+                            g.layout_mode = LayoutMode::Tiled;
+                            g.split_tree = Some(protocol::SplitTree::Leaf { pane_id: 0, window_id: window_ids[0] });
+                            g.next_pane_id = 1;
+                            g.active_pane = Some(0);
+                            g.layout_preset = Some(layout.clone());
+                        }
+                    }
+                }
+            }
+            // Apply startup focus
+            if let Some(ref startup_group) = proj_preset.startup_group {
+                if let Some(gid) = session.find_group_by_name(project_id, startup_group) {
+                    session.select_group(gid);
+                    if let Some(ref startup_window) = proj_preset.startup_window {
+                        if let Some(wid) = session.find_window_by_name(gid, startup_window) {
+                            session.select_window(wid);
+                        }
+                    }
+                }
+            } else if let Some(ref startup_window) = proj_preset.startup_window {
+                // Search all groups for the named window
+                if let Some(Node::Project(p)) = session.nodes.get(&project_id) {
+                    let groups = p.children.clone();
+                    for gid in groups {
+                        if let Some(wid) = session.find_window_by_name(gid, startup_window) {
+                            session.select_group(gid);
+                            session.select_window(wid);
+                            break;
+                        }
+                    }
+                }
+            }
+            // Store on_project_stop hook on the project node
+            if proj_preset.on_project_stop.is_some() {
+                if let Some(Node::Project(p)) = session.nodes.get_mut(&project_id) {
+                    p.on_project_stop = proj_preset.on_project_stop.clone();
                 }
             }
             if proj_preset.groups.is_empty() {
@@ -297,6 +417,8 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                         pty_tx.clone(),
                         None,
                         None,
+                        None,
+                        proj_preset.pre_window.clone(),
                         None,
                     )?;
                 }
@@ -316,6 +438,8 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
             default_rows,
             default_cols,
             pty_tx.clone(),
+            None,
+            None,
             None,
             None,
             None,
@@ -403,6 +527,7 @@ fn serialize_state(
                 working_dir: p.working_dir.to_string_lossy().to_string(),
                 children: p.children.clone(),
                 env_profile: p.env_profile.clone(),
+                on_project_stop: p.on_project_stop.clone(),
             },
             Node::Group(g) => SerializedNode::Group {
                 name: g.name.clone(),
@@ -418,6 +543,7 @@ fn serialize_state(
                 next_pane_id: g.next_pane_id,
                 active_pane: g.active_pane,
                 env_profile: g.env_profile.clone(),
+                layout_preset: g.layout_preset.clone(),
             },
             Node::Window(_) => continue,
         };
@@ -446,6 +572,7 @@ fn serialize_state(
                     cols,
                     screen_dump,
                     env_profile: w.env_profile.clone(),
+                    on_pane_close: w.on_pane_close.clone(),
                 },
             ));
         }
@@ -567,11 +694,13 @@ fn restore_session(
                 working_dir,
                 children,
                 env_profile,
+                on_project_stop,
             } => Node::Project(ProjectNode {
                 name,
                 working_dir: PathBuf::from(working_dir),
                 children,
                 env_profile,
+                on_project_stop,
             }),
             SerializedNode::Group {
                 name,
@@ -584,6 +713,7 @@ fn restore_session(
                 next_pane_id,
                 active_pane,
                 env_profile,
+                layout_preset,
             } => Node::Group(GroupNode {
                 name,
                 parent,
@@ -595,6 +725,7 @@ fn restore_session(
                 next_pane_id,
                 active_pane,
                 env_profile,
+                layout_preset,
             }),
             SerializedNode::Window {
                 name,
@@ -605,6 +736,7 @@ fn restore_session(
                 cols,
                 screen_dump,
                 env_profile,
+                on_pane_close,
             } => {
                 set_cloexec(master_fd)?;
                 let pty = PtyHandle::from_raw_parts(
@@ -623,6 +755,7 @@ fn restore_session(
                     ai_status: None,
                     last_cpu_time: 0,
                     env_profile,
+                    on_pane_close,
                 })
             }
         };
@@ -780,6 +913,8 @@ async fn handle_client(
                         None,
                         None,
                         None,
+                        None,
+                        None,
                     ) {
                         st.session.select_window(id);
                         let tab = st.session.tab_state();
@@ -806,6 +941,8 @@ async fn handle_client(
                         term_rows,
                         cols,
                         pty_tx.clone(),
+                        None,
+                        None,
                         None,
                         None,
                         None,
@@ -839,6 +976,8 @@ async fn handle_client(
                     term_rows,
                     cols,
                     pty_tx.clone(),
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -879,11 +1018,30 @@ async fn handle_client(
                         let cols = cols.saturating_sub(2);
                         let mut first_project_id = None;
                         for proj_preset in &preset.projects {
+                            let proj_dir = PathBuf::from(&proj_preset.path);
+                            // Run lifecycle hooks
+                            if let Some(ref cmd) = proj_preset.on_project_start {
+                                drop(st);
+                                run_hook(cmd, &proj_dir).await;
+                                st = state.lock().await;
+                            }
+                            if config::is_first_start(&proj_preset.name) {
+                                if let Some(ref cmd) = proj_preset.on_project_first_start {
+                                    drop(st);
+                                    run_hook(cmd, &proj_dir).await;
+                                    st = state.lock().await;
+                                }
+                            } else if let Some(ref cmd) = proj_preset.on_project_restart {
+                                drop(st);
+                                run_hook(cmd, &proj_dir).await;
+                                st = state.lock().await;
+                            }
+
                             let project_id = st.session.find_project_by_name(&proj_preset.name)
                                 .unwrap_or_else(|| {
                                     st.session.add_project(
                                         proj_preset.name.clone(),
-                                        PathBuf::from(&proj_preset.path),
+                                        proj_dir,
                                     )
                                 });
                             if proj_preset.env_profile.is_some() {
@@ -928,12 +1086,14 @@ async fn handle_client(
                                             None,
                                             None,
                                             None,
+                                            proj_preset.pre_window.clone(),
+                                            None,
                                         );
                                     }
                                 } else {
                                     for win_preset in &grp_preset.windows {
                                         if st.session.find_window_by_name(group_id, &win_preset.name).is_none() {
-                                            let _ = st.session.add_window(
+                                            if let Ok(wid) = st.session.add_window(
                                                 group_id,
                                                 win_preset.name.clone(),
                                                 term_rows,
@@ -942,9 +1102,66 @@ async fn handle_client(
                                                 win_preset.command.clone(),
                                                 win_preset.path.as_ref().map(PathBuf::from),
                                                 win_preset.env_profile.clone(),
-                                            );
+                                                proj_preset.pre_window.clone(),
+                                                win_preset.on_pane_close.clone(),
+                                            ) {
+                                                if let Some(ref hook) = win_preset.on_pane_open {
+                                                    if let Some(Node::Window(w)) = st.session.nodes.get_mut(&wid) {
+                                                        let _ = w.pty.write(format!("{}\n", hook).as_bytes());
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
+                                }
+                                // Apply layout preset if specified
+                                if let Some(ref layout) = grp_preset.layout {
+                                    if let Some(Node::Group(g)) = st.session.nodes.get_mut(&group_id) {
+                                        let window_ids: Vec<NodeId> = g.children.clone();
+                                        if window_ids.len() > 1 {
+                                            let panes: Vec<(u32, NodeId)> = window_ids.iter().enumerate()
+                                                .map(|(i, &wid)| (i as u32, wid)).collect();
+                                            g.layout_mode = LayoutMode::Tiled;
+                                            g.split_tree = crate::session::build_layout_tree(&panes, layout);
+                                            g.next_pane_id = panes.len() as u32;
+                                            g.active_pane = Some(0);
+                                            g.layout_preset = Some(layout.clone());
+                                        } else if window_ids.len() == 1 {
+                                            g.layout_mode = LayoutMode::Tiled;
+                                            g.split_tree = Some(protocol::SplitTree::Leaf { pane_id: 0, window_id: window_ids[0] });
+                                            g.next_pane_id = 1;
+                                            g.active_pane = Some(0);
+                                            g.layout_preset = Some(layout.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            // Apply startup focus
+                            if let Some(ref startup_group) = proj_preset.startup_group {
+                                if let Some(gid) = st.session.find_group_by_name(project_id, startup_group) {
+                                    st.session.select_group(gid);
+                                    if let Some(ref startup_window) = proj_preset.startup_window {
+                                        if let Some(wid) = st.session.find_window_by_name(gid, startup_window) {
+                                            st.session.select_window(wid);
+                                        }
+                                    }
+                                }
+                            } else if let Some(ref startup_window) = proj_preset.startup_window {
+                                if let Some(Node::Project(p)) = st.session.nodes.get(&project_id) {
+                                    let groups = p.children.clone();
+                                    for gid in groups {
+                                        if let Some(wid) = st.session.find_window_by_name(gid, startup_window) {
+                                            st.session.select_group(gid);
+                                            st.session.select_window(wid);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            // Store on_project_stop hook
+                            if proj_preset.on_project_stop.is_some() {
+                                if let Some(Node::Project(p)) = st.session.nodes.get_mut(&project_id) {
+                                    p.on_project_stop = proj_preset.on_project_stop.clone();
                                 }
                             }
                         }
@@ -1100,7 +1317,19 @@ async fn handle_client(
             }
             ClientMsg::CloseWindow => {
                 if let Some(wid) = st.session.active_window {
+                    // Extract on_pane_close hook before removing
+                    let hook_info = if let Some(Node::Window(w)) = st.session.nodes.get(&wid) {
+                        w.on_pane_close.as_ref().map(|cmd| {
+                            let dir = st.session.window_working_dir(w.parent);
+                            (cmd.clone(), dir)
+                        })
+                    } else {
+                        None
+                    };
                     st.session.remove_window(wid);
+                    if let Some((cmd, dir)) = hook_info {
+                        tokio::spawn(async move { run_hook(&cmd, &dir).await });
+                    }
                     let tab = st.session.tab_state();
                     st.broadcast(tab);
                     if let Some(new_wid) = st.session.active_window {
@@ -1115,8 +1344,15 @@ async fn handle_client(
             }
             ClientMsg::CloseNode { id } => {
                 match st.session.nodes.get(&id) {
-                    Some(Node::Window(_)) => {
+                    Some(Node::Window(w)) => {
+                        let hook_info = w.on_pane_close.as_ref().map(|cmd| {
+                            let dir = st.session.window_working_dir(w.parent);
+                            (cmd.clone(), dir)
+                        });
                         st.session.remove_window(id);
+                        if let Some((cmd, dir)) = hook_info {
+                            tokio::spawn(async move { run_hook(&cmd, &dir).await });
+                        }
                     }
                     Some(Node::Group(_)) => {
                         if let Some((project_dir, wt_path)) = st.session.remove_group(id) {
@@ -1127,7 +1363,11 @@ async fn handle_client(
                             }
                         }
                     }
-                    Some(Node::Project(_)) => {
+                    Some(Node::Project(p)) => {
+                        // Run on_project_stop hook before removing
+                        let hook_info = p.on_project_stop.as_ref().map(|cmd| {
+                            (cmd.clone(), p.working_dir.clone())
+                        });
                         let wt_infos = st.session.remove_project(id);
                         for (project_dir, wt_path) in wt_infos {
                             if let Err(e) = worktree::remove(&project_dir, &wt_path, false) {
@@ -1135,6 +1375,9 @@ async fn handle_client(
                                     message: format!("Worktree cleanup failed: {}", e),
                                 });
                             }
+                        }
+                        if let Some((cmd, dir)) = hook_info {
+                            tokio::spawn(async move { run_hook(&cmd, &dir).await });
                         }
                     }
                     None => {}
@@ -1270,6 +1513,8 @@ async fn handle_client(
                                 term_rows,
                                 cols,
                                 pty_tx.clone(),
+                                None,
+                                None,
                                 None,
                                 None,
                                 None,
@@ -1555,6 +1800,17 @@ async fn handle_client(
             ClientMsg::Shutdown => {
                 info!("Shutdown requested");
                 let _ = std::fs::remove_file(protocol::socket_path());
+                // Run on_project_stop hooks before exiting
+                let project_hooks: Vec<(String, PathBuf)> = st.session.root_children.iter()
+                    .filter_map(|&id| match st.session.nodes.get(&id) {
+                        Some(Node::Project(p)) => p.on_project_stop.as_ref().map(|cmd| (cmd.clone(), p.working_dir.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                drop(st);
+                for (cmd, dir) in project_hooks {
+                    run_hook(&cmd, &dir).await;
+                }
                 std::process::exit(0);
             }
             ClientMsg::Reload => {

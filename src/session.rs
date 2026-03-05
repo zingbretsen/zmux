@@ -22,6 +22,7 @@ pub(crate) struct ProjectNode {
     pub(crate) working_dir: PathBuf,
     pub(crate) children: Vec<NodeId>,
     pub(crate) env_profile: Option<String>,
+    pub(crate) on_project_stop: Option<String>,
 }
 
 pub(crate) struct GroupNode {
@@ -40,6 +41,7 @@ pub(crate) struct GroupNode {
     /// Which pane is currently focused
     pub(crate) active_pane: Option<u32>,
     pub(crate) env_profile: Option<String>,
+    pub(crate) layout_preset: Option<config::LayoutPreset>,
 }
 
 pub(crate) struct WindowNode {
@@ -49,6 +51,7 @@ pub(crate) struct WindowNode {
     pub(crate) ai_status: Option<AiStatus>,
     pub(crate) last_cpu_time: u64,
     pub(crate) env_profile: Option<String>,
+    pub(crate) on_pane_close: Option<String>,
 }
 
 pub(crate) enum Node {
@@ -116,7 +119,7 @@ impl SessionTree {
     pub(crate) fn add_project(&mut self, name: String, working_dir: PathBuf) -> NodeId {
         let id = self.alloc_id();
         self.nodes.insert(id, Node::Project(ProjectNode {
-            name, working_dir, children: Vec::new(), env_profile: None,
+            name, working_dir, children: Vec::new(), env_profile: None, on_project_stop: None,
         }));
         self.root_children.push(id);
         if self.active_project.is_none() {
@@ -134,6 +137,7 @@ impl SessionTree {
             next_pane_id: 0,
             active_pane: None,
             env_profile: None,
+            layout_preset: None,
         }));
         if let Some(Node::Project(p)) = self.nodes.get_mut(&parent) {
             p.children.push(id);
@@ -154,6 +158,8 @@ impl SessionTree {
         command: Option<String>,
         path_override: Option<PathBuf>,
         env_profile: Option<String>,
+        pre_command: Option<String>,
+        on_pane_close: Option<String>,
     ) -> Result<NodeId> {
         let id = self.alloc_id();
         let working_dir = path_override.unwrap_or_else(|| self.window_working_dir(parent));
@@ -193,6 +199,10 @@ impl SessionTree {
 
         let (mut pty, mut pty_rx) = PtyHandle::spawn_in(rows, cols, &working_dir, &env, self.shell.as_deref())?;
 
+        // Write pre_command (e.g., virtualenv activation) before the startup command
+        if let Some(ref pre) = pre_command {
+            let _ = pty.write(format!("{}\n", pre).as_bytes());
+        }
         // If a startup command was specified, write it to the PTY
         if let Some(ref cmd) = command {
             let _ = pty.write(format!("{}\n", cmd).as_bytes());
@@ -210,7 +220,7 @@ impl SessionTree {
             let _ = pty_output_tx.send((win_id, Vec::new()));
         });
 
-        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty, ai_status: None, last_cpu_time: 0, env_profile: effective_profile }));
+        self.nodes.insert(id, Node::Window(WindowNode { name, parent, pty, ai_status: None, last_cpu_time: 0, env_profile: effective_profile, on_pane_close }));
         if let Some(Node::Group(g)) = self.nodes.get_mut(&parent) {
             g.children.push(id);
         }
@@ -1150,6 +1160,8 @@ impl SessionTree {
                                 path,
                                 command: None,
                                 env_profile: w.env_profile.clone(),
+                                on_pane_open: None,
+                                on_pane_close: w.on_pane_close.clone(),
                             })
                         },
                         _ => None,
@@ -1162,6 +1174,7 @@ impl SessionTree {
                         wt.file_name().map(|n| n.to_string_lossy().to_string())
                     }),
                     env_profile: g.env_profile.clone(),
+                    layout: g.layout_preset.clone(),
                     windows,
                 })
             }).collect();
@@ -1169,6 +1182,13 @@ impl SessionTree {
                 name: p.name.clone(),
                 path: p.working_dir.to_string_lossy().to_string(),
                 env_profile: p.env_profile.clone(),
+                startup_group: None,
+                startup_window: None,
+                pre_window: None,
+                on_project_start: None,
+                on_project_first_start: None,
+                on_project_restart: None,
+                on_project_stop: p.on_project_stop.clone(),
                 groups,
             })
         }).collect();
@@ -1218,6 +1238,82 @@ impl SessionTree {
                 _ => None,
             }
         }).collect()
+    }
+}
+
+/// Build a split tree from a list of (pane_id, window_id) pairs and a named layout preset.
+pub(crate) fn build_layout_tree(
+    windows: &[(u32, NodeId)],
+    layout: &config::LayoutPreset,
+) -> Option<SplitTree> {
+    if windows.is_empty() {
+        return None;
+    }
+    if windows.len() == 1 {
+        return Some(SplitTree::Leaf {
+            pane_id: windows[0].0,
+            window_id: windows[0].1,
+        });
+    }
+    Some(match layout {
+        config::LayoutPreset::EvenHorizontal => build_even_split(windows, SplitDir::Vertical),
+        config::LayoutPreset::EvenVertical => build_even_split(windows, SplitDir::Horizontal),
+        config::LayoutPreset::MainHorizontal => build_main_split(windows, SplitDir::Horizontal),
+        config::LayoutPreset::MainVertical => build_main_split(windows, SplitDir::Vertical),
+        config::LayoutPreset::Tiled => build_tiled(windows),
+    })
+}
+
+fn build_even_split(windows: &[(u32, NodeId)], dir: SplitDir) -> SplitTree {
+    if windows.len() == 1 {
+        return SplitTree::Leaf { pane_id: windows[0].0, window_id: windows[0].1 };
+    }
+    let n = windows.len();
+    SplitTree::Split {
+        direction: dir,
+        ratio: 1.0 / n as f64,
+        first: Box::new(SplitTree::Leaf { pane_id: windows[0].0, window_id: windows[0].1 }),
+        second: Box::new(build_even_split(&windows[1..], dir)),
+    }
+}
+
+fn build_main_split(windows: &[(u32, NodeId)], dir: SplitDir) -> SplitTree {
+    let secondary_dir = match dir {
+        SplitDir::Horizontal => SplitDir::Vertical,
+        SplitDir::Vertical => SplitDir::Horizontal,
+    };
+    SplitTree::Split {
+        direction: dir,
+        ratio: 0.65,
+        first: Box::new(SplitTree::Leaf { pane_id: windows[0].0, window_id: windows[0].1 }),
+        second: Box::new(build_even_split(&windows[1..], secondary_dir)),
+    }
+}
+
+fn build_tiled(windows: &[(u32, NodeId)]) -> SplitTree {
+    let n = windows.len();
+    let cols = (n as f64).sqrt().ceil() as usize;
+    let rows = (n + cols - 1) / cols;
+
+    let row_trees: Vec<SplitTree> = (0..rows).map(|r| {
+        let start = r * cols;
+        let end = (start + cols).min(n);
+        build_even_split(&windows[start..end], SplitDir::Vertical)
+    }).collect();
+
+    build_even_split_from_trees(&row_trees, SplitDir::Horizontal)
+}
+
+fn build_even_split_from_trees(trees: &[SplitTree], dir: SplitDir) -> SplitTree {
+    if trees.len() == 1 {
+        return trees[0].clone();
+    }
+    let n = trees.len();
+    SplitTree::Split {
+        direction: dir,
+        ratio: 1.0 / n as f64,
+        first: Box::new(trees[0].clone()),
+        second: Box::new(build_even_split_from_trees(&trees[1..], dir)),
     }
 }
 

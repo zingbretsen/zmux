@@ -3,6 +3,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutPreset {
+    EvenHorizontal,
+    EvenVertical,
+    MainHorizontal,
+    MainVertical,
+    Tiled,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Preset {
     #[serde(rename = "project", default)]
@@ -15,6 +25,20 @@ pub struct ProjectPreset {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_window: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_window: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_project_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_project_first_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_project_restart: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_project_stop: Option<String>,
     #[serde(rename = "group", default)]
     pub groups: Vec<GroupPreset>,
 }
@@ -26,6 +50,8 @@ pub struct GroupPreset {
     pub worktree_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutPreset>,
     #[serde(rename = "window", default)]
     pub windows: Vec<WindowPreset>,
 }
@@ -37,6 +63,10 @@ pub struct WindowPreset {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_pane_open: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_pane_close: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -58,6 +88,23 @@ pub fn load_config() -> Config {
 fn presets_dir() -> PathBuf {
     let config = dirs_or_default();
     config.join("presets")
+}
+
+fn state_dir() -> PathBuf {
+    dirs_or_default().join("state")
+}
+
+/// Returns true if this is the first time this project has been started.
+/// Creates a marker file on first call; subsequent calls return false.
+pub fn is_first_start(project_name: &str) -> bool {
+    let dir = state_dir();
+    let marker = dir.join(format!("{}.started", project_name));
+    if marker.exists() {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(&marker, "");
+    true
 }
 
 fn envs_dir() -> PathBuf {
@@ -244,23 +291,35 @@ mod tests {
                 name: "myproj".into(),
                 path: "/tmp".into(),
                 env_profile: Some("prod".into()),
+                startup_group: Some("main".into()),
+                startup_window: Some("editor".into()),
+                pre_window: Some("source .venv/bin/activate".into()),
+                on_project_start: Some("git fetch".into()),
+                on_project_first_start: Some("npm install".into()),
+                on_project_restart: None,
+                on_project_stop: Some("docker-compose down".into()),
                 groups: vec![GroupPreset {
                     name: "main".into(),
                     path: None,
                     worktree_branch: Some("feature".into()),
                     env_profile: None,
+                    layout: Some(LayoutPreset::MainVertical),
                     windows: vec![
                         WindowPreset {
                             name: "editor".into(),
                             path: Some("/home/user".into()),
                             command: Some("vim".into()),
                             env_profile: Some("dev".into()),
+                            on_pane_open: Some("echo ready".into()),
+                            on_pane_close: None,
                         },
                         WindowPreset {
                             name: "shell".into(),
                             path: None,
                             command: None,
                             env_profile: None,
+                            on_pane_open: None,
+                            on_pane_close: None,
                         },
                     ],
                 }],
@@ -276,6 +335,17 @@ mod tests {
         assert_eq!(decoded.projects[0].env_profile.as_deref(), Some("prod"));
         assert_eq!(decoded.projects[0].groups[0].env_profile, None);
         assert_eq!(decoded.projects[0].groups[0].windows[0].env_profile.as_deref(), Some("dev"));
+        // New fields
+        assert_eq!(decoded.projects[0].startup_group.as_deref(), Some("main"));
+        assert_eq!(decoded.projects[0].startup_window.as_deref(), Some("editor"));
+        assert_eq!(decoded.projects[0].pre_window.as_deref(), Some("source .venv/bin/activate"));
+        assert_eq!(decoded.projects[0].on_project_start.as_deref(), Some("git fetch"));
+        assert_eq!(decoded.projects[0].on_project_first_start.as_deref(), Some("npm install"));
+        assert_eq!(decoded.projects[0].on_project_restart, None);
+        assert_eq!(decoded.projects[0].on_project_stop.as_deref(), Some("docker-compose down"));
+        assert_eq!(decoded.projects[0].groups[0].layout, Some(LayoutPreset::MainVertical));
+        assert_eq!(decoded.projects[0].groups[0].windows[0].on_pane_open.as_deref(), Some("echo ready"));
+        assert_eq!(decoded.projects[0].groups[0].windows[0].on_pane_close, None);
     }
 
     #[test]

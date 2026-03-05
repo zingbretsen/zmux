@@ -162,6 +162,78 @@ worktree_branch = "feature-branch"
 name = "shell"
 ```
 
+### Layout Presets
+
+Groups can specify a `layout` to automatically arrange windows in a tiled layout:
+
+```toml
+[[project.group]]
+name = "dev"
+layout = "main-vertical"
+```
+
+Available layouts:
+
+| Layout | Description |
+|--------|-------------|
+| `even-horizontal` | All panes side by side, equal width |
+| `even-vertical` | All panes stacked, equal height |
+| `main-horizontal` | One large pane on top, rest in a row below |
+| `main-vertical` | One large pane on left, rest stacked on right |
+| `tiled` | Grid layout (balanced rows and columns) |
+
+### Startup Focus
+
+Control which window/group gets focus when a preset loads:
+
+```toml
+[[project]]
+name = "myproject"
+path = "/home/user/myproject"
+startup_group = "dev"
+startup_window = "editor"
+```
+
+### Lifecycle Hooks
+
+Hooks run shell commands at specific points in the session lifecycle:
+
+```toml
+[[project]]
+name = "myproject"
+path = "/home/user/myproject"
+on_project_start = "git fetch --all"
+on_project_first_start = "npm install"
+on_project_restart = "git pull"
+on_project_stop = "docker-compose down"
+pre_window = "source .venv/bin/activate"
+```
+
+| Hook | When it runs | How it runs |
+|------|-------------|-------------|
+| `on_project_start` | Every time the preset loads | Subprocess (before windows) |
+| `on_project_first_start` | Only the very first time | Subprocess (before windows) |
+| `on_project_restart` | On subsequent loads | Subprocess (before windows) |
+| `on_project_stop` | When project is closed or server shuts down | Subprocess |
+| `pre_window` | Before each window's command | PTY keystrokes (affects the shell) |
+
+Per-window hooks are also available:
+
+```toml
+[[project.group.window]]
+name = "server"
+command = "npm start"
+on_pane_open = "echo 'server starting'"
+on_pane_close = "echo 'server stopped' >> /tmp/log"
+```
+
+| Hook | When it runs | How it runs |
+|------|-------------|-------------|
+| `on_pane_open` | After the window command | PTY keystrokes |
+| `on_pane_close` | When the window/pane is destroyed | Subprocess |
+
+**Execution order** for a window: `pre_window` -> window `command` -> `on_pane_open`
+
 ## Env Profiles
 
 Env profiles are `.env` files stored in:
@@ -201,6 +273,6 @@ Layering order: directory `.env` files < project profile < group profile < windo
 - **AI awareness**: Detects claude, codex, aider, copilot processes and shows status indicators
 - **Git worktree integration**: Create groups backed by git worktrees, rebase/merge from within zmux
 - **Vim-style splits**: Binary split tree for tiling — split any pane horizontally or vertically, resize with ratios
-- **Presets**: Save and restore session trees as TOML
+- **Presets**: Save and restore session trees as TOML with layout presets, startup focus, and lifecycle hooks
 - **.env support**: Auto-injects `.env` variables into new windows based on project/group directory
 - **Client-server architecture**: Sessions persist across disconnects
