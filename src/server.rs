@@ -645,7 +645,16 @@ async fn perform_reload(state: Arc<Mutex<ServerState>>, listener: &UnixListener)
     }
 
     // exec() the new binary
+    // current_exe() reads /proc/self/exe which may return "…/zmux (deleted)"
+    // after cargo rebuilds the binary in-place. Strip the suffix so we exec
+    // the newly-written file at the original path.
     let exe = std::env::current_exe()?;
+    let exe_str = exe.to_string_lossy();
+    let exe = if exe_str.ends_with(" (deleted)") {
+        std::path::PathBuf::from(exe_str.trim_end_matches(" (deleted)"))
+    } else {
+        exe
+    };
     info!("exec()ing new binary: {}", exe.display());
 
     let state_path_str = state_path.to_string_lossy().to_string();
