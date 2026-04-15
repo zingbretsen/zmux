@@ -999,7 +999,7 @@ impl SessionTree {
         false
     }
 
-    pub(crate) fn active_tiled_windows(&self) -> &[NodeId] {
+    pub(crate) fn active_tiled_windows(&self) -> Vec<NodeId> {
         if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
                 if g.layout_mode == LayoutMode::Tiled {
@@ -1009,7 +1009,7 @@ impl SessionTree {
                 }
             }
         }
-        &[]
+        Vec::new()
     }
 
     pub(crate) fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
