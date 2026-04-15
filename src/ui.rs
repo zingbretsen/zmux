@@ -14,18 +14,10 @@ pub enum TabClick {
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    // Outer border to indicate we're inside zmux
-    let outer_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title_bottom(Line::from(" zmux ").right_aligned());
-    let inner = outer_block.inner(area);
-    f.render_widget(outer_block, area);
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(inner);
+        .split(area);
 
     draw_tab_bar(f, app, chunks[0]);
 
