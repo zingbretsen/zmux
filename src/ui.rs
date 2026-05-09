@@ -172,8 +172,8 @@ fn draw_branch_picker(f: &mut Frame, app: &App, area: Rect) {
     let width = width.min(area.width);
 
     // Position below the tab bar
-    let x = area.x + 2;
-    let y = area.y + 2; // below border + tab bar
+    let x = area.x + 1;
+    let y = area.y + 1; // below tab bar
     let popup = Rect::new(x, y, width, height);
 
     f.render_widget(Clear, popup);
@@ -229,8 +229,8 @@ fn draw_preset_picker(f: &mut Frame, app: &App, area: Rect) {
     let width = filtered.iter().map(|p| p.len()).max().unwrap_or(10).max(20) as u16 + 4;
     let width = width.min(area.width);
 
-    let x = area.x + 2;
-    let y = area.y + 2;
+    let x = area.x + 1;
+    let y = area.y + 1;
     let popup = Rect::new(x, y, width, height);
 
     f.render_widget(Clear, popup);
@@ -372,8 +372,8 @@ fn draw_picker_dropdown(f: &mut Frame, app: &App, area: Rect) {
     let width = items.iter().map(|e| e.name.len()).max().unwrap_or(10).max(12) as u16 + 4;
     let width = width.min(area.width);
 
-    let x = (app.dropdown_x + 1).min(area.width.saturating_sub(width));
-    let y = area.y + 2;
+    let x = app.dropdown_x.min(area.width.saturating_sub(width));
+    let y = area.y + 1;
     let popup = Rect::new(x, y, width, height);
 
     f.render_widget(Clear, popup);
@@ -898,7 +898,7 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
     let nav = matches!(app.mode, Mode::Nav);
     let prefix_width = x;
     let suffix_width = if nav { 6 } else { 0 };
-    let avail_width = (app.last_size.0 as usize).saturating_sub(prefix_width + suffix_width + 2); // +2 for border
+    let avail_width = (app.last_size.0 as usize).saturating_sub(prefix_width + suffix_width);
 
     let tab_widths: Vec<usize> = app.windows.iter().enumerate().map(|(i, entry)| {
         entry.name.len() + if i > 0 { 3 } else { 0 }

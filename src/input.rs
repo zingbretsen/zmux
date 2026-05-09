@@ -1726,13 +1726,13 @@ pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -
         }
     }
 
-    // Tab bar clicks work in any mode (row 1 = tab bar, row 0 = border)
-    if mouse.row == 1 {
+    // Tab bar clicks work in any mode (row 0 = tab bar)
+    if mouse.row == 0 {
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            if let Some(click) = ui::tab_click_at(app, mouse.column.saturating_sub(1)) {
+            if let Some(click) = ui::tab_click_at(app, mouse.column) {
                 match click {
                     ui::TabClick::Project => {
-                        app.dropdown_x = 1; // project starts at column 1
+                        app.dropdown_x = 0; // project starts at column 0
                         app.dropdown_selected = app.active_project
                             .and_then(|id| app.projects.iter().position(|e| e.id == id))
                             .unwrap_or(0);
@@ -1744,7 +1744,7 @@ pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -
                             .and_then(|id| app.projects.iter().find(|e| e.id == id))
                             .map(|e| e.name.as_str())
                             .unwrap_or("?");
-                        app.dropdown_x = (1 + proj_name.len() + 3) as u16;
+                        app.dropdown_x = (proj_name.len() + 3) as u16;
                         app.dropdown_selected = app.active_group
                             .and_then(|id| app.groups.iter().position(|e| e.id == id))
                             .unwrap_or(0);

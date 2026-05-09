@@ -156,8 +156,8 @@ pub struct App {
 impl App {
     pub async fn new(conn: ClientConnection, rows: u16, cols: u16) -> Result<Self> {
         conn.send_resize(cols, rows).await?;
-        let term_rows = rows.saturating_sub(3);
-        let term_cols = cols.saturating_sub(2);
+        let term_rows = rows.saturating_sub(1);
+        let term_cols = cols;
         Ok(App {
             conn,
             should_quit: false,
@@ -322,8 +322,8 @@ impl App {
     pub async fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         if self.last_size != (cols, rows) {
             self.last_size = (cols, rows);
-            self.term_rows = rows.saturating_sub(3);
-            self.term_cols = cols.saturating_sub(2);
+            self.term_rows = rows.saturating_sub(1);
+            self.term_cols = cols;
             // Resize all existing parsers
             for parser in self.parsers.values() {
                 parser.lock().unwrap_or_else(|e| e.into_inner()).set_size(self.term_rows, self.term_cols);

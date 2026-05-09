@@ -850,8 +850,8 @@ async fn handle_client(
             ClientMsg::Resize { cols, rows } => {
                 st.client_sizes.insert(client_id, (cols, rows));
                 let (eff_cols, eff_rows) = st.effective_size();
-                let term_rows = eff_rows.saturating_sub(3);
-                let eff_cols = eff_cols.saturating_sub(2);
+                let term_rows = eff_rows.saturating_sub(1);
+                let eff_cols = eff_cols;
                 let _ = st.session.resize_all(term_rows, eff_cols);
                 if let Some(wid) = st.session.active_window {
                     if let Some(data) = st.session.screen_dump(wid) {
@@ -932,8 +932,8 @@ async fn handle_client(
             ClientMsg::NewWindow { name } => {
                 if let Some(group_id) = st.session.active_group {
                     let (cols, rows) = st.effective_size();
-                    let term_rows = rows.saturating_sub(3);
-                    let cols = cols.saturating_sub(2);
+                    let term_rows = rows.saturating_sub(1);
+                    let cols = cols;
                     let win_name = name.unwrap_or_else(|| {
                         let count =
                             if let Some(Node::Group(g)) = st.session.nodes.get(&group_id) {
@@ -972,8 +972,8 @@ async fn handle_client(
                     });
                     let group_id = st.session.add_group(project_id, grp_name, None, None);
                     let (cols, rows) = st.effective_size();
-                    let term_rows = rows.saturating_sub(3);
-                    let cols = cols.saturating_sub(2);
+                    let term_rows = rows.saturating_sub(1);
+                    let cols = cols;
                     if let Ok(wid) = st.session.add_window(
                         group_id,
                         "shell".to_string(),
@@ -1007,8 +1007,8 @@ async fn handle_client(
                     st.session
                         .add_group(project_id, "default".to_string(), None, None);
                 let (cols, rows) = st.effective_size();
-                let term_rows = rows.saturating_sub(3);
-                let cols = cols.saturating_sub(2);
+                let term_rows = rows.saturating_sub(1);
+                let cols = cols;
                 if let Ok(wid) = st.session.add_window(
                     group_id,
                     "shell".to_string(),
@@ -1053,8 +1053,8 @@ async fn handle_client(
                 match config::load_preset(&name) {
                     Ok(preset) => {
                         let (cols, rows) = st.effective_size();
-                        let term_rows = rows.saturating_sub(3);
-                        let cols = cols.saturating_sub(2);
+                        let term_rows = rows.saturating_sub(1);
+                        let cols = cols;
                         let mut first_project_id = None;
                         for proj_preset in &preset.projects {
                             let proj_dir = PathBuf::from(&proj_preset.path);
@@ -1544,8 +1544,8 @@ async fn handle_client(
                                 Some(wt_path),
                             );
                             let (cols, rows) = st.effective_size();
-                            let term_rows = rows.saturating_sub(3);
-                            let cols = cols.saturating_sub(2);
+                            let term_rows = rows.saturating_sub(1);
+                            let cols = cols;
                             if let Ok(wid) = st.session.add_window(
                                 group_id,
                                 "shell".to_string(),
@@ -1641,8 +1641,8 @@ async fn handle_client(
             ClientMsg::ToggleLayout => {
                 st.session.toggle_layout();
                 let (cols, rows) = st.effective_size();
-                let term_rows = rows.saturating_sub(3);
-                let cols = cols.saturating_sub(2);
+                let term_rows = rows.saturating_sub(1);
+                let cols = cols;
                 if let Err(e) = st.session.resize_all(term_rows, cols) {
                     warn!("resize_all failed: {}", e);
                 }
@@ -1668,8 +1668,8 @@ async fn handle_client(
             ClientMsg::SplitPane { direction } => {
                 st.session.split_pane(direction);
                 let (cols, rows) = st.effective_size();
-                let term_rows = rows.saturating_sub(3);
-                let cols = cols.saturating_sub(2);
+                let term_rows = rows.saturating_sub(1);
+                let cols = cols;
                 if let Err(e) = st.session.resize_all(term_rows, cols) {
                     warn!("resize_all failed: {}", e);
                 }
@@ -1712,8 +1712,8 @@ async fn handle_client(
             ClientMsg::SwapSplitDirection => {
                 st.session.swap_split_direction();
                 let (cols, rows) = st.effective_size();
-                let term_rows = rows.saturating_sub(3);
-                let cols = cols.saturating_sub(2);
+                let term_rows = rows.saturating_sub(1);
+                let cols = cols;
                 if let Err(e) = st.session.resize_all(term_rows, cols) {
                     warn!("resize_all failed: {}", e);
                 }
@@ -1731,8 +1731,8 @@ async fn handle_client(
             ClientMsg::CyclePaneContent { forward } => {
                 if st.session.cycle_pane_content(forward) {
                     let (cols, rows) = st.effective_size();
-                    let term_rows = rows.saturating_sub(3);
-                    let cols = cols.saturating_sub(2);
+                    let term_rows = rows.saturating_sub(1);
+                    let cols = cols;
                     let _ = st.session.resize_all(term_rows, cols);
                     let tab = st.session.tab_state();
                     st.broadcast(tab);
@@ -1802,8 +1802,8 @@ async fn handle_client(
             ClientMsg::ResizePane { direction } => {
                 st.session.resize_pane(direction);
                 let (cols, rows) = st.effective_size();
-                let term_rows = rows.saturating_sub(3);
-                let cols = cols.saturating_sub(2);
+                let term_rows = rows.saturating_sub(1);
+                let cols = cols;
                 if let Err(e) = st.session.resize_all(term_rows, cols) {
                     warn!("resize_all failed: {}", e);
                 }
@@ -1904,8 +1904,8 @@ async fn handle_client(
         st.client_sizes.remove(&client_id);
         if !st.clients.is_empty() {
             let (cols, rows) = st.effective_size();
-            let term_rows = rows.saturating_sub(3);
-            let cols = cols.saturating_sub(2);
+            let term_rows = rows.saturating_sub(1);
+            let cols = cols;
             let _ = st.session.resize_all(term_rows, cols);
         }
     }
