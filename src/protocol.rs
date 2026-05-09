@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 pub type NodeId = u64;
 
@@ -325,8 +326,15 @@ pub enum ClientMsg {
     SetProjectDir,
     /// Save active window's cwd as the group's default directory
     SetGroupDir,
-    /// Save current session tree as a preset
-    SavePreset { name: Option<String>, force: bool },
+    /// Save current session tree as a preset.
+    /// If `include` is Some, only windows whose IDs are in the set are saved;
+    /// groups with no included windows and projects with no included groups are dropped.
+    SavePreset {
+        name: Option<String>,
+        force: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include: Option<HashSet<NodeId>>,
+    },
     /// Cycle to the next window with an AI session (across all projects/groups)
     NextAiWindow,
     /// Cycle to the previous window with an AI session
@@ -351,8 +359,6 @@ pub enum ClientMsg {
     MergeIntoMain,
     /// Close the active window
     CloseWindow,
-    /// Search all windows for text content
-    SearchWindows { query: String },
     /// Toggle group layout mode (Stacked ↔ Tiled)
     ToggleLayout,
     /// Split the active pane horizontally or vertically
@@ -375,6 +381,8 @@ pub enum ClientMsg {
     CloseNode { id: NodeId },
     /// Request full session tree (for tree nav)
     RequestTree,
+    /// Replace the active pane's window with the specified window (tiled mode only)
+    SwapActivePaneWith { window_id: NodeId },
     /// Shut down the server
     Shutdown,
     /// Hot reload: server serializes state, exec()s new binary
@@ -428,6 +436,8 @@ pub enum ServerMsg {
         active_project: Option<NodeId>,
         active_group: Option<NodeId>,
         active_window: Option<NodeId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset_name: Option<String>,
     },
 }
 

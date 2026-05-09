@@ -1,5 +1,6 @@
 use crate::protocol::{self, ClientMsg, NodeId, PaneDirection, ServerMsg, SplitDir};
 use anyhow::Result;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
@@ -88,8 +89,13 @@ impl ClientConnection {
         self.send(ClientMsg::SetGroupDir).await
     }
 
-    pub async fn save_preset(&self, name: Option<String>, force: bool) -> Result<()> {
-        self.send(ClientMsg::SavePreset { name, force }).await
+    pub async fn save_preset(
+        &self,
+        name: Option<String>,
+        force: bool,
+        include: Option<HashSet<NodeId>>,
+    ) -> Result<()> {
+        self.send(ClientMsg::SavePreset { name, force, include }).await
     }
 
     pub async fn next_ai_window(&self) -> Result<()> {
@@ -144,10 +150,6 @@ impl ClientConnection {
         self.send(ClientMsg::CloseGroup { force }).await
     }
 
-    pub async fn search_windows(&self, query: String) -> Result<()> {
-        self.send(ClientMsg::SearchWindows { query }).await
-    }
-
     pub async fn detach(&self) -> Result<()> {
         self.send(ClientMsg::Detach).await
     }
@@ -198,6 +200,10 @@ impl ClientConnection {
 
     pub async fn request_tree(&self) -> Result<()> {
         self.send(ClientMsg::RequestTree).await
+    }
+
+    pub async fn swap_active_pane_with(&self, window_id: NodeId) -> Result<()> {
+        self.send(ClientMsg::SwapActivePaneWith { window_id }).await
     }
 
     pub async fn list_env_profiles(&self) -> Result<()> {

@@ -865,6 +865,16 @@ async fn handle_client(
                         });
                     }
                 }
+                for wid in st.session.active_tiled_windows() {
+                    if Some(wid) != st.session.active_window {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            st.broadcast(ServerMsg::ScreenDump {
+                                window_id: wid,
+                                data,
+                            });
+                        }
+                    }
+                }
             }
             ClientMsg::SelectGroup { id } => {
                 st.session.select_group(id);
@@ -878,6 +888,16 @@ async fn handle_client(
                         });
                     }
                 }
+                for wid in st.session.active_tiled_windows() {
+                    if Some(wid) != st.session.active_window {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            st.broadcast(ServerMsg::ScreenDump {
+                                window_id: wid,
+                                data,
+                            });
+                        }
+                    }
+                }
             }
             ClientMsg::SelectWindow { id } => {
                 st.session.select_window(id);
@@ -888,6 +908,16 @@ async fn handle_client(
                         window_id: id,
                         data,
                     });
+                }
+                for wid in st.session.active_tiled_windows() {
+                    if Some(wid) != st.session.active_window {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            st.broadcast(ServerMsg::ScreenDump {
+                                window_id: wid,
+                                data,
+                            });
+                        }
+                    }
                 }
             }
             ClientMsg::NewWindow { name } => {
@@ -1193,7 +1223,7 @@ async fn handle_client(
                     .unwrap_or_else(|| "No active window".to_string());
                 let _ = client_tx.send(ServerMsg::Info { message: msg });
             }
-            ClientMsg::SavePreset { name, force } => {
+            ClientMsg::SavePreset { name, force, include } => {
                 let preset_name = name
                     .or_else(|| st.preset_name.clone())
                     .unwrap_or_else(|| {
@@ -1211,7 +1241,7 @@ async fn handle_client(
                         name: preset_name,
                     });
                 } else {
-                    let preset = st.session.to_preset();
+                    let preset = st.session.to_preset_filtered(include.as_ref());
                     match config::save_preset(&preset_name, &preset) {
                         Ok(_) => {
                             st.preset_name = Some(preset_name.clone());
@@ -1599,29 +1629,6 @@ async fn handle_client(
                     }
                 }
             }
-            ClientMsg::SearchWindows { query } => match st.session.search_windows(&query) {
-                Some((pid, gid, wid, name)) => {
-                    st.session.active_project = Some(pid);
-                    st.session.active_group = Some(gid);
-                    st.session.active_window = Some(wid);
-                    let tab = st.session.tab_state();
-                    st.broadcast(tab);
-                    if let Some(data) = st.session.screen_dump(wid) {
-                        st.broadcast(ServerMsg::ScreenDump {
-                            window_id: wid,
-                            data,
-                        });
-                    }
-                    let _ = client_tx.send(ServerMsg::Info {
-                        message: format!("Found in: {}", name),
-                    });
-                }
-                None => {
-                    let _ = client_tx.send(ServerMsg::Info {
-                        message: "No match found".to_string(),
-                    });
-                }
-            },
             ClientMsg::ToggleLayout => {
                 st.session.toggle_layout();
                 let (cols, rows) = st.effective_size();
@@ -1734,6 +1741,28 @@ async fn handle_client(
                     });
                 }
             }
+            ClientMsg::SwapActivePaneWith { window_id } => {
+                if st.session.swap_active_pane_with(window_id) {
+                    let (cols, rows) = st.effective_size();
+                    let term_rows = rows.saturating_sub(3);
+                    let cols = cols.saturating_sub(2);
+                    let _ = st.session.resize_all(term_rows, cols);
+                    let tab = st.session.tab_state();
+                    st.broadcast(tab);
+                    for wid in st.session.active_tiled_windows() {
+                        if let Some(data) = st.session.screen_dump(wid) {
+                            st.broadcast(ServerMsg::ScreenDump {
+                                window_id: wid,
+                                data,
+                            });
+                        }
+                    }
+                } else {
+                    let _ = client_tx.send(ServerMsg::Info {
+                        message: "Cannot swap: not in tiled mode or window already visible".to_string(),
+                    });
+                }
+            }
             ClientMsg::CyclePaneContentGlobal { forward } => {
                 if st.session.cycle_pane_content_global(forward) {
                     let (cols, rows) = st.effective_size();
@@ -1794,6 +1823,7 @@ async fn handle_client(
                     active_project: st.session.active_project,
                     active_group: st.session.active_group,
                     active_window: st.session.active_window,
+                    preset_name: st.preset_name.clone(),
                 });
             }
             ClientMsg::Detach => break,

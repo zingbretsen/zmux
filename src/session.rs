@@ -261,6 +261,33 @@ impl SessionTree {
             }
         }
 
+        // Prune foreign split_trees that reference this window
+        let keys: Vec<NodeId> = self.nodes.keys().copied().collect();
+        for node_id in keys {
+            if Some(node_id) == parent_id {
+                continue; // already handled above
+            }
+            let has_ref = matches!(
+                self.nodes.get(&node_id),
+                Some(Node::Group(g)) if g.split_tree.as_ref().map(|t| t.window_ids().contains(&window_id)).unwrap_or(false)
+            );
+            if has_ref {
+                if let Some(Node::Group(g)) = self.nodes.get_mut(&node_id) {
+                    if let Some(tree) = g.split_tree.take() {
+                        g.split_tree = tree.remove_window(window_id);
+                        if g.split_tree.is_none() {
+                            g.active_pane = None;
+                            g.layout_mode = LayoutMode::Stacked;
+                        } else if let Some(ap) = g.active_pane {
+                            if g.split_tree.as_ref().unwrap().window_for_pane(ap).is_none() {
+                                g.active_pane = g.split_tree.as_ref().unwrap().leaves().first().map(|(pid, _)| *pid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // If this was the active window, select a sibling
         if self.active_window == Some(window_id) {
             self.active_window = parent_id.and_then(|pid| {
@@ -289,9 +316,9 @@ impl SessionTree {
             _ => return None,
         };
 
-        // Remove all windows in the group
+        // Remove all windows in the group (cascades foreign split_tree cleanup)
         for wid in &window_ids {
-            self.nodes.remove(wid);
+            self.remove_window(*wid);
         }
         self.nodes.remove(&group_id);
 
@@ -571,45 +598,6 @@ impl SessionTree {
         self.active_group = Some(gid);
         self.active_window = Some(wid);
         true
-    }
-
-    /// Search all windows' screen content for a query string (case-insensitive).
-    /// Returns (project_id, group_id, window_id, window_name) of first match.
-    pub(crate) fn search_windows(&self, query: &str) -> Option<(NodeId, NodeId, NodeId, String)> {
-        let query_lower = query.to_lowercase();
-        for &pid in &self.root_children {
-            if let Some(Node::Project(p)) = self.nodes.get(&pid) {
-                for &gid in &p.children {
-                    if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                        for &wid in &g.children {
-                            if let Some(Node::Window(w)) = self.nodes.get(&wid) {
-                                let parser = w.pty.parser.lock().unwrap_or_else(|e| e.into_inner());
-                                let screen = parser.screen();
-                                let (rows, cols) = screen.size();
-                                let mut text = String::new();
-                                for row in 0..rows {
-                                    for col in 0..cols {
-                                        if let Some(cell) = screen.cell(row, col) {
-                                            let c = cell.contents();
-                                            if c.is_empty() {
-                                                text.push(' ');
-                                            } else {
-                                                text.push_str(&c);
-                                            }
-                                        }
-                                    }
-                                    text.push('\n');
-                                }
-                                if text.to_lowercase().contains(&query_lower) {
-                                    return Some((pid, gid, wid, w.name.clone()));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
 
     pub(crate) fn toggle_layout(&mut self) {
@@ -895,6 +883,40 @@ impl SessionTree {
         true
     }
 
+    /// Replace the active pane with the given window (must not already be in the split tree).
+    /// Returns false if preconditions not met.
+    pub(crate) fn swap_active_pane_with(&mut self, window_id: NodeId) -> bool {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return false,
+        };
+        let active_pane = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && g.split_tree.is_some() => g.active_pane,
+            _ => return false,
+        };
+        let active_pane = match active_pane {
+            Some(ap) => ap,
+            None => return false,
+        };
+        if !matches!(self.nodes.get(&window_id), Some(Node::Window(_))) {
+            return false;
+        }
+        let already_in_tree = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) => g.split_tree.as_ref().map(|t| t.window_ids().contains(&window_id)).unwrap_or(false),
+            _ => false,
+        };
+        if already_in_tree {
+            return false;
+        }
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if let Some(ref mut tree) = g.split_tree {
+                tree.set_pane_window(active_pane, window_id);
+            }
+        }
+        self.active_window = Some(window_id);
+        true
+    }
+
     /// Spatial focus navigation: find the nearest pane in the given direction
     pub(crate) fn focus_pane(&mut self, direction: PaneDirection) {
         let gid = match self.active_group {
@@ -1131,20 +1153,30 @@ impl SessionTree {
         Ok(())
     }
 
-    /// Convert current session tree to a Preset for saving
-    pub(crate) fn to_preset(&self) -> config::Preset {
+    /// Convert current session tree to a Preset, optionally including only windows
+    /// whose IDs appear in `include`. Groups with no included windows are dropped;
+    /// projects with no remaining groups are dropped.
+    pub(crate) fn to_preset_filtered(
+        &self,
+        include: Option<&std::collections::HashSet<NodeId>>,
+    ) -> config::Preset {
         let projects = self.root_children.iter().filter_map(|pid| {
             let p = match self.nodes.get(pid) {
                 Some(Node::Project(p)) => p,
                 _ => return None,
             };
-            let groups = p.children.iter().filter_map(|gid| {
+            let groups: Vec<config::GroupPreset> = p.children.iter().filter_map(|gid| {
                 let g = match self.nodes.get(gid) {
                     Some(Node::Group(g)) => g,
                     _ => return None,
                 };
                 let group_dir = self.window_working_dir(*gid);
-                let windows = g.children.iter().filter_map(|wid| {
+                let windows: Vec<config::WindowPreset> = g.children.iter().filter_map(|wid| {
+                    if let Some(inc) = include {
+                        if !inc.contains(wid) {
+                            return None;
+                        }
+                    }
                     match self.nodes.get(wid) {
                         Some(Node::Window(w)) => {
                             let win_cwd = w.pty.cwd();
@@ -1167,6 +1199,9 @@ impl SessionTree {
                         _ => None,
                     }
                 }).collect();
+                if include.is_some() && windows.is_empty() {
+                    return None;
+                }
                 Some(config::GroupPreset {
                     name: g.name.clone(),
                     path: g.working_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
@@ -1178,6 +1213,9 @@ impl SessionTree {
                     windows,
                 })
             }).collect();
+            if include.is_some() && groups.is_empty() {
+                return None;
+            }
             Some(config::ProjectPreset {
                 name: p.name.clone(),
                 path: p.working_dir.to_string_lossy().to_string(),

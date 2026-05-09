@@ -10,17 +10,42 @@ pub enum Mode {
     Normal,
     Nav,
     Copy,
-    Search,
     AiNav,
     Rename,
     BranchInput,
     PresetInput,
     Help,
     TreeNav,
+    TreeSelect,
     ProjectPicker,
     GroupPicker,
     ConfirmOverwrite,
     EnvProfilePicker,
+}
+
+/// Why the preset picker UI is currently open.
+#[derive(PartialEq, Clone, Copy)]
+pub enum PresetPickerPurpose {
+    /// Loading an existing preset (original behavior)
+    Load,
+    /// Naming a preset to save (possibly from the tree-select flow)
+    Save,
+}
+
+/// Why the tree nav is currently open.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum TreeNavPurpose {
+    #[default]
+    Navigate,
+    SwapPane,
+}
+
+/// Three-state selection for a parent node in the tree-select view.
+#[derive(PartialEq)]
+pub enum TriState {
+    All,
+    Some,
+    None,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -88,6 +113,12 @@ pub struct App {
     pub preset_candidates: Vec<String>,
     pub preset_selected: Option<usize>,
     pub preset_from_tree: bool,
+    /// Why the preset picker is currently open
+    pub preset_picker_purpose: PresetPickerPurpose,
+    /// When saving a preset from the tree-select flow, the selected window IDs
+    pub pending_save_selection: Option<HashSet<NodeId>>,
+    /// Name of the currently-loaded preset (if any), as reported by the server
+    pub loaded_preset_name: Option<String>,
 
     // Project/group picker dropdown state
     pub dropdown_selected: usize,
@@ -101,8 +132,16 @@ pub struct App {
     pub tree_active_project: Option<NodeId>,
     pub tree_active_group: Option<NodeId>,
     pub tree_active_window: Option<NodeId>,
+    /// Window IDs currently selected in TreeSelect mode
+    pub tree_select_included: HashSet<NodeId>,
     /// Parsers for tree nav preview (separate from main parsers)
     pub tree_parsers: HashMap<NodeId, Arc<Mutex<vt100::Parser>>>,
+    /// Tree search: filters by project/group name, else window buffer content
+    pub tree_search_active: bool,
+    pub tree_search_query: String,
+
+    /// Why the tree nav overlay is open
+    pub tree_nav_purpose: TreeNavPurpose,
 
     // Overwrite confirmation state
     pub overwrite_preset_name: Option<String>,
@@ -153,6 +192,9 @@ impl App {
             preset_candidates: Vec::new(),
             preset_selected: None,
             preset_from_tree: false,
+            preset_picker_purpose: PresetPickerPurpose::Load,
+            pending_save_selection: None,
+            loaded_preset_name: None,
             dropdown_selected: 0,
             dropdown_x: 0,
             tree_data: Vec::new(),
@@ -162,7 +204,11 @@ impl App {
             tree_active_project: None,
             tree_active_group: None,
             tree_active_window: None,
+            tree_select_included: HashSet::new(),
             tree_parsers: HashMap::new(),
+            tree_search_active: false,
+            tree_search_query: String::new(),
+            tree_nav_purpose: TreeNavPurpose::Navigate,
             overwrite_preset_name: None,
             env_profile_candidates: Vec::new(),
             env_profile_selected: None,
@@ -236,7 +282,10 @@ impl App {
                 self.status_message = Some(("Server reloading...".to_string(), Instant::now()));
                 self.should_reconnect = true;
             }
-            ServerMsg::FullTree { projects, active_project, active_group, active_window } => {
+            ServerMsg::FullTree { projects, active_project, active_group, active_window, preset_name } => {
+                if let Some(name) = preset_name {
+                    self.loaded_preset_name = Some(name);
+                }
                 // Build preview parsers from screen data
                 self.tree_parsers.clear();
                 for proj in &projects {
@@ -260,6 +309,11 @@ impl App {
                 if is_fresh {
                     // Position cursor on the currently active item when first opening
                     self.tree_cursor = self.tree_find_active_index();
+                }
+                // If we're in TreeSelect mode and haven't populated the selection
+                // yet, default to "everything selected".
+                if self.mode == Mode::TreeSelect && self.tree_select_included.is_empty() {
+                    self.tree_select_init_all();
                 }
             }
         }
@@ -399,37 +453,143 @@ impl App {
         Ok(())
     }
 
-    /// Build a flattened list of visible tree items, respecting collapsed state
+    /// Build a flattened list of visible tree items, respecting collapsed state.
+    /// When tree search is active with a non-empty query, applies filtering:
+    /// - Keep all windows under a project whose name matches
+    /// - Otherwise keep all windows under a group whose name matches
+    /// - Otherwise keep only windows whose buffer content matches
+    /// - Hide groups with no visible windows; hide projects with no visible groups
+    /// - Auto-expand everything while filtering
+    /// When tree_nav_purpose == SwapPane, post-filters to exclude windows already in the active split_tree.
     pub fn tree_visible_items(&self) -> Vec<TreeItem> {
-        let mut items = Vec::new();
-        for proj in &self.tree_data {
-            let proj_expanded = !self.tree_collapsed_projects.contains(&proj.id);
-            items.push(TreeItem::Project {
-                id: proj.id,
-                name: proj.name.clone(),
-                expanded: proj_expanded,
-            });
-            if proj_expanded {
-                for grp in &proj.groups {
-                    let grp_expanded = !self.tree_collapsed_groups.contains(&grp.id);
-                    items.push(TreeItem::Group {
-                        id: grp.id,
-                        name: grp.name.clone(),
-                        expanded: grp_expanded,
-                    });
-                    if grp_expanded {
-                        for win in &grp.windows {
-                            items.push(TreeItem::Window {
-                                id: win.id,
-                                name: win.name.clone(),
-                                ai_status: win.ai_status.clone(),
-                            });
+        let query = self.tree_search_query.to_lowercase();
+        let filtering = self.tree_search_active && !query.is_empty();
+
+        // In swap mode, collect which window IDs are already visible in the active split_tree
+        let excluded_ids: std::collections::HashSet<NodeId> = if self.tree_nav_purpose == TreeNavPurpose::SwapPane {
+            self.split_tree.as_ref().map(|t| t.window_ids().into_iter().collect()).unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        if !filtering {
+            let mut items = Vec::new();
+            for proj in &self.tree_data {
+                let proj_expanded = !self.tree_collapsed_projects.contains(&proj.id);
+                items.push(TreeItem::Project {
+                    id: proj.id,
+                    name: proj.name.clone(),
+                    expanded: proj_expanded,
+                });
+                if proj_expanded {
+                    for grp in &proj.groups {
+                        let grp_expanded = !self.tree_collapsed_groups.contains(&grp.id);
+                        items.push(TreeItem::Group {
+                            id: grp.id,
+                            name: grp.name.clone(),
+                            expanded: grp_expanded,
+                        });
+                        if grp_expanded {
+                            for win in &grp.windows {
+                                if excluded_ids.contains(&win.id) {
+                                    continue;
+                                }
+                                items.push(TreeItem::Window {
+                                    id: win.id,
+                                    name: win.name.clone(),
+                                    ai_status: win.ai_status.clone(),
+                                });
+                            }
                         }
                     }
                 }
             }
+            return items;
+        }
+
+        let mut items = Vec::new();
+        for proj in &self.tree_data {
+            let proj_matches = proj.name.to_lowercase().contains(&query);
+            let mut proj_items: Vec<TreeItem> = Vec::new();
+
+            for grp in &proj.groups {
+                let grp_matches = grp.name.to_lowercase().contains(&query);
+                let mut grp_items: Vec<TreeItem> = Vec::new();
+
+                for win in &grp.windows {
+                    if excluded_ids.contains(&win.id) {
+                        continue;
+                    }
+                    let visible = proj_matches
+                        || grp_matches
+                        || win.name.to_lowercase().contains(&query)
+                        || self.tree_window_buffer_matches(win.id, &query);
+                    if visible {
+                        grp_items.push(TreeItem::Window {
+                            id: win.id,
+                            name: win.name.clone(),
+                            ai_status: win.ai_status.clone(),
+                        });
+                    }
+                }
+
+                if !grp_items.is_empty() {
+                    proj_items.push(TreeItem::Group {
+                        id: grp.id,
+                        name: grp.name.clone(),
+                        expanded: true,
+                    });
+                    proj_items.extend(grp_items);
+                }
+            }
+
+            if !proj_items.is_empty() {
+                items.push(TreeItem::Project {
+                    id: proj.id,
+                    name: proj.name.clone(),
+                    expanded: true,
+                });
+                items.extend(proj_items);
+            }
         }
         items
+    }
+
+    /// Search a window's preview parser buffer for the given (already lowercased) query.
+    fn tree_window_buffer_matches(&self, window_id: NodeId, query_lower: &str) -> bool {
+        let parser = match self.tree_parsers.get(&window_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        let parser = parser.lock().unwrap_or_else(|e| e.into_inner());
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        let mut text = String::new();
+        for row in 0..rows {
+            for col in 0..cols {
+                if let Some(cell) = screen.cell(row, col) {
+                    let c = cell.contents();
+                    if c.is_empty() {
+                        text.push(' ');
+                    } else {
+                        text.push_str(&c);
+                    }
+                }
+            }
+            text.push('\n');
+        }
+        text.to_lowercase().contains(query_lower)
+    }
+
+    /// Move tree cursor to the first Window item in the current filtered view,
+    /// or 0 if none. Used when the query changes to surface a selectable result.
+    pub fn tree_cursor_to_first_window(&mut self) {
+        let items = self.tree_visible_items();
+        if let Some(idx) = items.iter().position(|it| matches!(it, TreeItem::Window { .. })) {
+            self.tree_cursor = idx;
+        } else {
+            self.tree_cursor = 0;
+        }
     }
 
     /// Find the index in the visible items list that corresponds to the active window
@@ -489,5 +649,115 @@ impl App {
         None
     }
 
+    /// Populate `tree_select_included` with every window ID in the current tree.
+    pub fn tree_select_init_all(&mut self) {
+        self.tree_select_included.clear();
+        for proj in &self.tree_data {
+            for grp in &proj.groups {
+                for win in &grp.windows {
+                    self.tree_select_included.insert(win.id);
+                }
+            }
+        }
+    }
 
+    /// Tri-state selection for a group based on how many of its windows are included.
+    pub fn group_tri_state(&self, group_id: NodeId) -> TriState {
+        for proj in &self.tree_data {
+            for grp in &proj.groups {
+                if grp.id != group_id {
+                    continue;
+                }
+                if grp.windows.is_empty() {
+                    return TriState::None;
+                }
+                let included = grp.windows.iter().filter(|w| self.tree_select_included.contains(&w.id)).count();
+                return if included == 0 {
+                    TriState::None
+                } else if included == grp.windows.len() {
+                    TriState::All
+                } else {
+                    TriState::Some
+                };
+            }
+        }
+        TriState::None
+    }
+
+    /// Tri-state selection for a project based on its groups' tri-states.
+    pub fn project_tri_state(&self, project_id: NodeId) -> TriState {
+        for proj in &self.tree_data {
+            if proj.id != project_id {
+                continue;
+            }
+            let total_windows: usize = proj.groups.iter().map(|g| g.windows.len()).sum();
+            if total_windows == 0 {
+                return TriState::None;
+            }
+            let included: usize = proj.groups.iter()
+                .flat_map(|g| g.windows.iter())
+                .filter(|w| self.tree_select_included.contains(&w.id))
+                .count();
+            return if included == 0 {
+                TriState::None
+            } else if included == total_windows {
+                TriState::All
+            } else {
+                TriState::Some
+            };
+        }
+        TriState::None
+    }
+
+    /// Toggle selection for the item under the tree cursor in TreeSelect mode.
+    /// Cascading: toggling a project/group cascades to all descendants.
+    /// Partial-state parents are forced fully ON (to match the "easy re-include" intent).
+    pub fn tree_select_toggle_cursor(&mut self) {
+        let items = self.tree_visible_items();
+        let item = match items.get(self.tree_cursor) {
+            Some(it) => it,
+            None => return,
+        };
+        match item {
+            TreeItem::Window { id, .. } => {
+                if self.tree_select_included.contains(id) {
+                    self.tree_select_included.remove(id);
+                } else {
+                    self.tree_select_included.insert(*id);
+                }
+            }
+            TreeItem::Group { id, .. } => {
+                let state = self.group_tri_state(*id);
+                let target_on = !matches!(state, TriState::All);
+                let win_ids: Vec<NodeId> = self.tree_data.iter()
+                    .flat_map(|p| p.groups.iter())
+                    .filter(|g| g.id == *id)
+                    .flat_map(|g| g.windows.iter().map(|w| w.id))
+                    .collect();
+                for wid in win_ids {
+                    if target_on {
+                        self.tree_select_included.insert(wid);
+                    } else {
+                        self.tree_select_included.remove(&wid);
+                    }
+                }
+            }
+            TreeItem::Project { id, .. } => {
+                let state = self.project_tri_state(*id);
+                let target_on = !matches!(state, TriState::All);
+                let win_ids: Vec<NodeId> = self.tree_data.iter()
+                    .filter(|p| p.id == *id)
+                    .flat_map(|p| p.groups.iter())
+                    .flat_map(|g| g.windows.iter().map(|w| w.id))
+                    .collect();
+                for wid in win_ids {
+                    if target_on {
+                        self.tree_select_included.insert(wid);
+                    } else {
+                        self.tree_select_included.remove(&wid);
+                    }
+                }
+            }
+        }
+    }
 }

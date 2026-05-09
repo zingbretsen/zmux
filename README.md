@@ -39,13 +39,13 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `a` | Enter AI nav mode |
 | `s` | Save current cwd as group directory |
 | `S` | Save current cwd as project directory |
-| `W` | Save session as preset (prompts y/n before overwriting existing) |
+| `W` | Open preset save view — tree of projects/groups/windows with checkboxes (Space to toggle, Enter to name/save the selection) |
 | `L` | Load preset into current session (type to filter, ↑/↓ to select, Tab to autocomplete) |
 | `w` | Create new worktree group (type a name or pick from branch list with ↑/↓, Tab to autocomplete) |
 | `X` | Close active group (removes worktree if applicable) |
 | `R` | Rebase active group's branch onto main |
 | `M` | Merge active group's worktree branch into main |
-| `/` | Search across all windows for text |
+| `/` | Open session tree in search mode (filter by project/group/window names and buffer content) |
 | `[` | Enter copy (scroll) mode |
 | `]` | Paste from copy buffer |
 | `t` | Toggle layout mode (Stacked ↔ Tiled) |
@@ -61,6 +61,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `E` | Source env profile into active window's running shell |
 | `u` | Hot reload server binary (upgrade in place) |
 | `f` | Open session tree navigator (with preview) |
+| `F` | Open swap-pane finder — pick any window to replace focused pane (tiled mode) |
 | `?` | Show help overlay |
 
 ### Tree Nav Mode
@@ -84,8 +85,35 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `P` | Load preset (stays in tree nav, jumps to first new window) |
 | `g` | Jump to top |
 | `G` | Jump to bottom |
+| `/` | Start incremental search filter (by project/group/window names, falling back to window buffer content) |
 | Click item | Select item and jump to it |
 | Scroll wheel | Move cursor up/down |
+
+### Tree Select Mode (after pressing `W` in Nav — selective preset save)
+
+| Key | Action |
+|-----|--------|
+| `Space` | Toggle the item under the cursor (cascades to descendants for projects/groups; partial-state parents snap to fully on) |
+| `Enter` | Open name prompt for the selected items (pre-filled with current preset name) |
+| `Esc` | Cancel without saving |
+| `j` / `k` / `↑` / `↓` | Move cursor |
+| `g` / `G` | Jump to top / bottom |
+| `h` / `l` | Fold / expand |
+| `H` / `L` | Collapse / expand one level at a time |
+| `J` / `K` | Jump to next / previous item of same level |
+
+Checkbox glyphs: `[x]` all selected, `[-]` partial, `[ ]` none. Groups with no selected windows and projects with no selected groups are dropped from the saved preset.
+
+### Tree Search (after pressing `/` in Tree Nav)
+
+| Key | Action |
+|-----|--------|
+| Type characters | Append to query; tree filters live; cursor jumps to first matching window |
+| `Backspace` | Remove last character from query |
+| `Up` / `Ctrl+K` | Move cursor up through filtered items |
+| `Down` / `Ctrl+J` | Move cursor down through filtered items |
+| `Enter` | Jump to focused item and exit |
+| `Esc` | Cancel search (clears query, stays in tree nav) |
 
 ### Copy Mode
 

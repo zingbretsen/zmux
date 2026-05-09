@@ -1,4 +1,4 @@
-use crate::app::{App, Mode, TabLevel, TreeItem};
+use crate::app::{App, Mode, PresetPickerPurpose, TabLevel, TreeItem, TreeNavPurpose};
 use crate::protocol::{PaneDirection, SplitDir};
 use crate::ui;
 use anyhow::Result;
@@ -20,7 +20,6 @@ pub async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         Mode::AiNav => handle_ai_nav_key(app, key).await,
         Mode::Rename => handle_rename_key(app, key).await,
         Mode::Copy => handle_copy_key(app, key).await,
-        Mode::Search => handle_search_key(app, key).await,
         Mode::BranchInput => handle_branch_input_key(app, key).await,
         Mode::PresetInput => handle_preset_input_key(app, key).await,
         Mode::Help => {
@@ -28,6 +27,7 @@ pub async fn handle_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             Ok(())
         }
         Mode::TreeNav => handle_tree_nav_key(app, key).await,
+        Mode::TreeSelect => handle_tree_select_key(app, key).await,
         Mode::ProjectPicker | Mode::GroupPicker => handle_picker_key(app, key).await,
         Mode::ConfirmOverwrite => handle_confirm_overwrite_key(app, key).await,
         Mode::EnvProfilePicker => handle_env_profile_picker_key(app, key).await,
@@ -178,9 +178,12 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.conn.set_group_dir().await?;
         }
 
-        // Save preset
+        // Save preset: enter tree-select view with everything toggled on
         KeyCode::Char('W') => {
-            app.conn.save_preset(None, false).await?;
+            app.tree_select_included.clear();
+            app.conn.request_tree().await?;
+            // Selection is populated to "all" when the FullTree arrives.
+            app.mode = Mode::TreeSelect;
         }
 
         // Load preset
@@ -189,6 +192,7 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.preset_candidates.clear();
             app.preset_selected = None;
             app.preset_from_tree = false;
+            app.preset_picker_purpose = PresetPickerPurpose::Load;
             app.conn.list_presets().await?;
             app.mode = Mode::PresetInput;
         }
@@ -232,10 +236,12 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.conn.merge_into_main().await?;
         }
 
-        // Search across windows
+        // Open session tree with search active (filter across projects/groups/windows)
         KeyCode::Char('/') => {
-            app.rename_buf.clear();
-            app.mode = Mode::Search;
+            app.conn.request_tree().await?;
+            app.mode = Mode::TreeNav;
+            app.tree_search_active = true;
+            app.tree_search_query.clear();
         }
 
         // Enter copy mode
@@ -267,9 +273,21 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.conn.close_group(false).await?;
         }
 
+        // Swap pane (tiled): open tree finder to pick a replacement window
+        KeyCode::Char('F') => {
+            app.conn.request_tree().await?;
+            app.tree_nav_purpose = if app.is_tiled() {
+                TreeNavPurpose::SwapPane
+            } else {
+                TreeNavPurpose::Navigate
+            };
+            app.mode = Mode::TreeNav;
+        }
+
         // Tree nav (session overview)
         KeyCode::Char('f') => {
             app.conn.request_tree().await?;
+            app.tree_nav_purpose = TreeNavPurpose::Navigate;
             app.mode = Mode::TreeNav;
         }
 
@@ -452,40 +470,78 @@ async fn handle_preset_input_key(app: &mut App, key: &crossterm::event::KeyEvent
     match key.code {
         KeyCode::Esc => {
             let from_tree = app.preset_from_tree;
+            let purpose = app.preset_picker_purpose;
             app.rename_buf.clear();
             app.preset_candidates.clear();
             app.preset_selected = None;
             app.preset_from_tree = false;
-            if from_tree {
-                app.mode = Mode::TreeNav;
-            } else {
-                app.mode = Mode::Nav;
+            app.preset_picker_purpose = PresetPickerPurpose::Load;
+            match purpose {
+                PresetPickerPurpose::Save => {
+                    // Return to the tree-select view, preserving selection
+                    app.mode = Mode::TreeSelect;
+                }
+                PresetPickerPurpose::Load => {
+                    if from_tree {
+                        app.mode = Mode::TreeNav;
+                    } else {
+                        app.mode = Mode::Nav;
+                    }
+                }
             }
         }
         KeyCode::Enter => {
             let filtered = app.filtered_presets();
             let name = if let Some(idx) = app.preset_selected {
                 filtered.get(idx).map(|s| s.to_string())
+            } else if !app.rename_buf.is_empty() {
+                Some(app.rename_buf.clone())
             } else {
                 filtered.first().map(|s| s.to_string())
             };
             let name = name.unwrap_or_else(|| app.rename_buf.clone());
             let from_tree = app.preset_from_tree;
-            if !name.is_empty() {
-                app.conn.load_preset(name).await?;
-            }
-            app.rename_buf.clear();
-            app.preset_candidates.clear();
-            app.preset_selected = None;
-            app.preset_from_tree = false;
-            if from_tree {
-                // Re-request tree to pick up newly loaded preset;
-                // the FullTree handler will position cursor on the active window
-                // (which the server set to the first window of the first preset project)
-                app.conn.request_tree().await?;
-                app.mode = Mode::TreeNav;
-            } else {
-                app.mode = Mode::Normal;
+            let purpose = app.preset_picker_purpose;
+
+            match purpose {
+                PresetPickerPurpose::Save => {
+                    if name.is_empty() {
+                        return Ok(());
+                    }
+                    let include = app.pending_save_selection.clone();
+                    // ConfirmOverwrite flow (if preset exists) will keep us in the
+                    // confirmation mode; otherwise the server responds with Info.
+                    app.conn.save_preset(Some(name), false, include).await?;
+                    // Leave rename_buf/candidates intact in case ConfirmOverwrite
+                    // bounces back; reset other state.
+                    app.rename_buf.clear();
+                    app.preset_candidates.clear();
+                    app.preset_selected = None;
+                    app.preset_from_tree = false;
+                    app.preset_picker_purpose = PresetPickerPurpose::Load;
+                    // Clear the tree-select view data so we don't flash it again
+                    app.tree_data.clear();
+                    app.tree_parsers.clear();
+                    app.tree_select_included.clear();
+                    app.mode = Mode::Nav;
+                }
+                PresetPickerPurpose::Load => {
+                    if !name.is_empty() {
+                        app.conn.load_preset(name).await?;
+                    }
+                    app.rename_buf.clear();
+                    app.preset_candidates.clear();
+                    app.preset_selected = None;
+                    app.preset_from_tree = false;
+                    app.preset_picker_purpose = PresetPickerPurpose::Load;
+                    if from_tree {
+                        // Re-request tree to pick up newly loaded preset
+                        app.conn.request_tree().await?;
+                        app.mode = Mode::TreeNav;
+                    } else {
+                        app.mode = Mode::Normal;
+                    }
+                }
             }
         }
         KeyCode::Down => {
@@ -598,24 +654,69 @@ async fn handle_env_profile_picker_key(app: &mut App, key: &crossterm::event::Ke
     Ok(())
 }
 
-async fn handle_search_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+async fn handle_tree_search_input(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
     match key.code {
         KeyCode::Esc => {
-            app.rename_buf.clear();
-            app.mode = Mode::Nav;
+            // Cancel search: clear query and deactivate, stay in TreeNav
+            app.tree_search_active = false;
+            app.tree_search_query.clear();
         }
         KeyCode::Enter => {
-            if !app.rename_buf.is_empty() {
-                app.conn.search_windows(app.rename_buf.clone()).await?;
+            let items = app.tree_visible_items();
+            if let Some(item) = items.get(app.tree_cursor) {
+                match (app.tree_nav_purpose, item) {
+                    (TreeNavPurpose::SwapPane, TreeItem::Window { id, .. }) => {
+                        app.conn.swap_active_pane_with(*id).await?;
+                    }
+                    (TreeNavPurpose::SwapPane, _) => {
+                        // No-op: Enter on non-window in swap mode does nothing (keep overlay open)
+                        return Ok(());
+                    }
+                    (TreeNavPurpose::Navigate, TreeItem::Project { id, .. }) => {
+                        app.conn.select_project(*id).await?;
+                    }
+                    (TreeNavPurpose::Navigate, TreeItem::Group { id, .. }) => {
+                        app.conn.select_group(*id).await?;
+                    }
+                    (TreeNavPurpose::Navigate, TreeItem::Window { id, .. }) => {
+                        app.conn.select_window(*id).await?;
+                    }
+                }
             }
-            app.rename_buf.clear();
+            app.tree_search_active = false;
+            app.tree_search_query.clear();
+            app.tree_data.clear();
+            app.tree_parsers.clear();
+            app.tree_nav_purpose = TreeNavPurpose::Navigate;
             app.mode = Mode::Normal;
         }
+        KeyCode::Up => {
+            app.tree_cursor = app.tree_cursor.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            let count = app.tree_visible_items().len();
+            if count > 0 {
+                app.tree_cursor = (app.tree_cursor + 1).min(count - 1);
+            }
+        }
+        KeyCode::Char('j') if ctrl => {
+            let count = app.tree_visible_items().len();
+            if count > 0 {
+                app.tree_cursor = (app.tree_cursor + 1).min(count - 1);
+            }
+        }
+        KeyCode::Char('k') if ctrl => {
+            app.tree_cursor = app.tree_cursor.saturating_sub(1);
+        }
         KeyCode::Backspace => {
-            app.rename_buf.pop();
+            app.tree_search_query.pop();
+            app.tree_cursor_to_first_window();
         }
         KeyCode::Char(c) => {
-            app.rename_buf.push(c);
+            app.tree_search_query.push(c);
+            app.tree_cursor_to_first_window();
         }
         _ => {}
     }
@@ -623,6 +724,10 @@ async fn handle_search_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
 }
 
 async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    if app.tree_search_active {
+        return handle_tree_search_input(app, key).await;
+    }
+
     let items = app.tree_visible_items();
     let count = items.len();
 
@@ -630,7 +735,16 @@ async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) ->
         KeyCode::Esc | KeyCode::Char('q') => {
             app.tree_data.clear();
             app.tree_parsers.clear();
+            app.tree_search_active = false;
+            app.tree_search_query.clear();
+            app.tree_nav_purpose = TreeNavPurpose::Navigate;
             app.mode = Mode::Normal;
+        }
+
+        // Activate search filter within tree view
+        KeyCode::Char('/') => {
+            app.tree_search_active = true;
+            app.tree_search_query.clear();
         }
 
         KeyCode::Char('j') | KeyCode::Down => {
@@ -882,6 +996,7 @@ async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) ->
             app.preset_candidates.clear();
             app.preset_selected = None;
             app.preset_from_tree = true;
+            app.preset_picker_purpose = PresetPickerPurpose::Load;
             app.conn.list_presets().await?;
             app.mode = Mode::PresetInput;
         }
@@ -889,21 +1004,52 @@ async fn handle_tree_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) ->
         // Select item and navigate
         KeyCode::Enter => {
             if let Some(item) = items.get(app.tree_cursor) {
-                match item {
-                    TreeItem::Project { id, .. } => {
+                match (app.tree_nav_purpose, item) {
+                    (TreeNavPurpose::SwapPane, TreeItem::Window { id, .. }) => {
+                        app.conn.swap_active_pane_with(*id).await?;
+                        app.tree_data.clear();
+                        app.tree_parsers.clear();
+                        app.tree_search_active = false;
+                        app.tree_search_query.clear();
+                        app.tree_nav_purpose = TreeNavPurpose::Navigate;
+                        app.mode = Mode::Normal;
+                    }
+                    (TreeNavPurpose::SwapPane, _) => {
+                        // No-op: Enter on non-window in swap mode does nothing
+                    }
+                    (TreeNavPurpose::Navigate, TreeItem::Project { id, .. }) => {
                         app.conn.select_project(*id).await?;
+                        app.tree_data.clear();
+                        app.tree_parsers.clear();
+                        app.tree_search_active = false;
+                        app.tree_search_query.clear();
+                        app.mode = Mode::Normal;
                     }
-                    TreeItem::Group { id, .. } => {
+                    (TreeNavPurpose::Navigate, TreeItem::Group { id, .. }) => {
                         app.conn.select_group(*id).await?;
+                        app.tree_data.clear();
+                        app.tree_parsers.clear();
+                        app.tree_search_active = false;
+                        app.tree_search_query.clear();
+                        app.mode = Mode::Normal;
                     }
-                    TreeItem::Window { id, .. } => {
+                    (TreeNavPurpose::Navigate, TreeItem::Window { id, .. }) => {
                         app.conn.select_window(*id).await?;
+                        app.tree_data.clear();
+                        app.tree_parsers.clear();
+                        app.tree_search_active = false;
+                        app.tree_search_query.clear();
+                        app.mode = Mode::Normal;
                     }
                 }
+            } else {
+                app.tree_data.clear();
+                app.tree_parsers.clear();
+                app.tree_search_active = false;
+                app.tree_search_query.clear();
+                app.tree_nav_purpose = TreeNavPurpose::Navigate;
+                app.mode = Mode::Normal;
             }
-            app.tree_data.clear();
-            app.tree_parsers.clear();
-            app.mode = Mode::Normal;
         }
 
         _ => {}
@@ -965,15 +1111,213 @@ fn tree_follow_cursor(app: &mut App, target_id: crate::protocol::NodeId) {
     }
 }
 
+async fn handle_tree_select_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    let items = app.tree_visible_items();
+    let count = items.len();
+
+    match key.code {
+        KeyCode::Esc => {
+            app.tree_data.clear();
+            app.tree_parsers.clear();
+            app.tree_select_included.clear();
+            app.mode = Mode::Nav;
+            return Ok(());
+        }
+
+        KeyCode::Char(' ') => {
+            app.tree_select_toggle_cursor();
+        }
+
+        KeyCode::Enter => {
+            if app.tree_select_included.is_empty() {
+                app.status_message = Some((
+                    "Nothing selected".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return Ok(());
+            }
+            // Hand off to the name-prompt step (reuse preset picker UI).
+            app.pending_save_selection = Some(app.tree_select_included.clone());
+            let prefill = app.loaded_preset_name.clone().unwrap_or_default();
+            app.rename_buf = prefill;
+            app.preset_candidates.clear();
+            app.preset_selected = None;
+            app.preset_from_tree = false;
+            app.preset_picker_purpose = PresetPickerPurpose::Save;
+            app.conn.list_presets().await?;
+            app.mode = Mode::PresetInput;
+            return Ok(());
+        }
+
+        KeyCode::Char('j') | KeyCode::Down => {
+            if count > 0 {
+                app.tree_cursor = (app.tree_cursor + 1).min(count - 1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.tree_cursor = app.tree_cursor.saturating_sub(1);
+        }
+        KeyCode::Char('g') => {
+            app.tree_cursor = 0;
+        }
+        KeyCode::Char('G') => {
+            if count > 0 {
+                app.tree_cursor = count - 1;
+            }
+        }
+
+        // h = fold (mirrors TreeNav)
+        KeyCode::Char('h') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                match item {
+                    TreeItem::Project { id, expanded, .. } => {
+                        if *expanded {
+                            app.tree_collapsed_projects.insert(*id);
+                        }
+                    }
+                    TreeItem::Group { id, expanded, .. } => {
+                        if *expanded {
+                            app.tree_collapsed_groups.insert(*id);
+                        } else if let Some(pid) = app.tree_parent_project(*id) {
+                            app.tree_collapsed_projects.insert(pid);
+                            let new_items = app.tree_visible_items();
+                            if let Some(idx) = new_items.iter().position(
+                                |it| matches!(it, TreeItem::Project { id: pid2, .. } if *pid2 == pid)
+                            ) {
+                                app.tree_cursor = idx;
+                            }
+                        }
+                    }
+                    TreeItem::Window { id, .. } => {
+                        if let Some(gid) = app.tree_parent_group(*id) {
+                            app.tree_collapsed_groups.insert(gid);
+                            let new_items = app.tree_visible_items();
+                            if let Some(idx) = new_items.iter().position(
+                                |it| matches!(it, TreeItem::Group { id: gid2, .. } if *gid2 == gid)
+                            ) {
+                                app.tree_cursor = idx;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // l = expand / step into first child (mirrors TreeNav)
+        KeyCode::Char('l') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                match item {
+                    TreeItem::Project { id, expanded, .. } => {
+                        if !*expanded {
+                            app.tree_collapsed_projects.remove(id);
+                        }
+                        let new_items = app.tree_visible_items();
+                        if app.tree_cursor + 1 < new_items.len() {
+                            app.tree_cursor += 1;
+                        }
+                    }
+                    TreeItem::Group { id, expanded, .. } => {
+                        if !*expanded {
+                            app.tree_collapsed_groups.remove(id);
+                        }
+                        let new_items = app.tree_visible_items();
+                        if app.tree_cursor + 1 < new_items.len() {
+                            app.tree_cursor += 1;
+                        }
+                    }
+                    TreeItem::Window { .. } => {}
+                }
+            }
+        }
+
+        // H / L = bulk fold/expand one level at a time (mirrors TreeNav)
+        KeyCode::Char('H') => {
+            let cursor_id = items.get(app.tree_cursor).map(tree_item_id);
+            let any_group_expanded = app.tree_data.iter().any(|proj| {
+                !app.tree_collapsed_projects.contains(&proj.id)
+                    && proj.groups.iter().any(|grp| !app.tree_collapsed_groups.contains(&grp.id))
+            });
+            if any_group_expanded {
+                for proj in &app.tree_data {
+                    for grp in &proj.groups {
+                        app.tree_collapsed_groups.insert(grp.id);
+                    }
+                }
+            } else {
+                for proj in &app.tree_data {
+                    app.tree_collapsed_projects.insert(proj.id);
+                }
+            }
+            if let Some(cid) = cursor_id {
+                tree_follow_cursor(app, cid);
+            }
+        }
+        KeyCode::Char('L') => {
+            let cursor_id = items.get(app.tree_cursor).map(tree_item_id);
+            let any_project_collapsed = app.tree_data.iter().any(|proj| {
+                app.tree_collapsed_projects.contains(&proj.id)
+            });
+            if any_project_collapsed {
+                app.tree_collapsed_projects.clear();
+            } else {
+                app.tree_collapsed_groups.clear();
+            }
+            if let Some(cid) = cursor_id {
+                tree_follow_cursor(app, cid);
+            }
+        }
+
+        // J / K = jump to next/previous item of same level
+        KeyCode::Char('J') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                let target_level = tree_item_level(item);
+                for i in (app.tree_cursor + 1)..count {
+                    if tree_item_level(&items[i]) == target_level {
+                        app.tree_cursor = i;
+                        break;
+                    }
+                }
+            }
+        }
+        KeyCode::Char('K') => {
+            if let Some(item) = items.get(app.tree_cursor) {
+                let target_level = tree_item_level(item);
+                for i in (0..app.tree_cursor).rev() {
+                    if tree_item_level(&items[i]) == target_level {
+                        app.tree_cursor = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        _ => {}
+    }
+
+    let new_count = app.tree_visible_items().len();
+    if new_count > 0 && app.tree_cursor >= new_count {
+        app.tree_cursor = new_count - 1;
+    }
+    Ok(())
+}
+
 async fn handle_confirm_overwrite_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             let name = app.overwrite_preset_name.take();
-            app.conn.save_preset(name, true).await?;
+            let include = app.pending_save_selection.take();
+            app.conn.save_preset(name, true, include).await?;
+            app.tree_data.clear();
+            app.tree_parsers.clear();
+            app.tree_select_included.clear();
             app.mode = Mode::Nav;
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             app.overwrite_preset_name = None;
+            app.pending_save_selection = None;
+            app.tree_data.clear();
+            app.tree_parsers.clear();
+            app.tree_select_included.clear();
             app.status_message = Some(("Save cancelled".to_string(), std::time::Instant::now()));
             app.mode = Mode::Nav;
         }
@@ -1467,6 +1811,8 @@ pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -
                         }
                         app.tree_data.clear();
                         app.tree_parsers.clear();
+                        app.tree_search_active = false;
+                        app.tree_search_query.clear();
                         app.mode = Mode::Normal;
                     }
                 }

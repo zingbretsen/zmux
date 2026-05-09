@@ -1,4 +1,4 @@
-use crate::app::{App, Mode, TabLevel, TreeItem};
+use crate::app::{App, Mode, TabLevel, TreeItem, TreeNavPurpose, TriState};
 use crate::protocol::{LayoutMode, SplitDir, SplitTree};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -51,7 +51,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     if matches!(app.mode, Mode::EnvProfilePicker) {
         draw_env_profile_picker(f, app, area);
     }
-    if matches!(app.mode, Mode::TreeNav) {
+    if matches!(app.mode, Mode::TreeNav | Mode::TreeSelect) {
         draw_tree_nav(f, app, area);
     }
     if matches!(app.mode, Mode::ProjectPicker | Mode::GroupPicker) {
@@ -120,7 +120,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
  r       Rename             ?       This help
  a       AI nav mode
  s       Set group dir      S       Set project dir
- W       Save preset        L       Load preset
+ W       Save preset (tree) L       Load preset
  w       New worktree group X       Close group
  R       Rebase onto main   M       Merge into main
  e       Set env profile    E       Source env profile
@@ -128,11 +128,13 @@ fn draw_help(f: &mut Frame, area: Rect) {
  -       Horizontal split   T       Swap split direction
  m       Close pane         n/N     Cycle pane (group)
  o/O     Cycle pane (all)
- f       Session tree       d       Detach
+ f       Session tree       F       Swap pane (tiled)
+ d       Detach
 
  Tree Nav: j/k move, h fold, l expand, Enter select
  Tree Nav: H/L collapse/expand one level, J/K same-level
- Tree Nav: r rename, x close, g/G top/bottom
+ Tree Nav: r rename, x close, g/G top/bottom, / search
+ Tree Search: type to filter, Up/Down or Ctrl+J/K
  AI Nav: h/l to cycle, Esc to exit
  Tiled: Ctrl+h/j/k/l to move focus
  Tiled: Shift+arrows to resize pane
@@ -432,9 +434,18 @@ pub fn picker_dropdown_rect(app: &App) -> Option<Rect> {
     Some(Rect::new(x, 2, width, height))
 }
 
+fn tri_state_glyph(state: TriState) -> &'static str {
+    match state {
+        TriState::All => "[x]",
+        TriState::Some => "[-]",
+        TriState::None => "[ ]",
+    }
+}
+
 fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
     let items = app.tree_visible_items();
-    if items.is_empty() {
+    // Don't bail while search is active with no matches — keep the overlay up
+    if items.is_empty() && !app.tree_search_active {
         return;
     }
 
@@ -451,10 +462,37 @@ fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
     let preview_area = halves[1];
 
     // Tree list
+    let select_mode = matches!(app.mode, Mode::TreeSelect);
+    let swap_mode = app.tree_nav_purpose == TreeNavPurpose::SwapPane;
+    let tree_title = if select_mode {
+        " Save Preset — Space: toggle · Enter: name · Esc: cancel ".to_string()
+    } else if swap_mode && app.tree_search_active {
+        format!(" SWAP PANE — Search: {}_ ", app.tree_search_query)
+    } else if swap_mode {
+        " SWAP PANE — pick a window ".to_string()
+    } else if app.tree_search_active {
+        format!(" Search: {}_ ", app.tree_search_query)
+    } else {
+        " Session Tree ".to_string()
+    };
+    let tree_border_color = if select_mode {
+        Color::Yellow
+    } else if swap_mode {
+        Color::Yellow
+    } else if app.tree_search_active {
+        Color::Magenta
+    } else {
+        Color::Cyan
+    };
+    let tree_title_style = if swap_mode {
+        Style::default().fg(Color::Black).bg(Color::Yellow).bold()
+    } else {
+        Style::default()
+    };
     let tree_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Session Tree ");
+        .border_style(Style::default().fg(tree_border_color))
+        .title(Span::styled(tree_title, tree_title_style));
     let tree_inner = tree_block.inner(tree_area);
     f.render_widget(tree_block, tree_area);
 
@@ -465,6 +503,14 @@ fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
     } else {
         0
     };
+
+    if items.is_empty() {
+        let msg = Paragraph::new(Span::styled(
+            " No matches",
+            Style::default().fg(Color::DarkGray).italic(),
+        ));
+        f.render_widget(msg, tree_inner);
+    }
 
     let lines: Vec<Line> = items
         .iter()
@@ -484,7 +530,15 @@ fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
                     if is_cursor {
                         style = style.fg(Color::Black).bg(Color::Cyan);
                     }
-                    Line::from(Span::styled(format!("{} {}", arrow, name), style))
+                    let prefix = if select_mode {
+                        format!("{} ", tri_state_glyph(app.project_tri_state(*id)))
+                    } else {
+                        String::new()
+                    };
+                    Line::from(Span::styled(
+                        format!("{}{} {}", prefix, arrow, name),
+                        style,
+                    ))
                 }
                 TreeItem::Group { id, name, expanded } => {
                     let arrow = if *expanded { "▾" } else { "▸" };
@@ -496,7 +550,15 @@ fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
                     if is_cursor {
                         style = style.fg(Color::Black).bg(Color::Green);
                     }
-                    Line::from(Span::styled(format!("  {} {}", arrow, name), style))
+                    let prefix = if select_mode {
+                        format!("{} ", tri_state_glyph(app.group_tri_state(*id)))
+                    } else {
+                        String::new()
+                    };
+                    Line::from(Span::styled(
+                        format!("  {}{} {}", prefix, arrow, name),
+                        style,
+                    ))
                 }
                 TreeItem::Window { id, name, ai_status } => {
                     let is_active = app.tree_active_window == Some(*id);
@@ -513,7 +575,20 @@ fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
                         Some(crate::ai_detect::AiStatus::Finished { .. }) => " ○",
                         None => "",
                     };
-                    Line::from(Span::styled(format!("    {}{}", name, ai_indicator), style))
+                    let prefix = if select_mode {
+                        let state = if app.tree_select_included.contains(id) {
+                            TriState::All
+                        } else {
+                            TriState::None
+                        };
+                        format!("{} ", tri_state_glyph(state))
+                    } else {
+                        String::new()
+                    };
+                    Line::from(Span::styled(
+                        format!("    {}{}{}", prefix, name, ai_indicator),
+                        style,
+                    ))
                 }
             }
         })
@@ -610,14 +685,6 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     if matches!(app.mode, Mode::Rename) {
         let line = Line::from(vec![
             Span::styled(" rename: ", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
-        ]);
-        f.render_widget(Paragraph::new(line), area);
-        return;
-    }
-    if matches!(app.mode, Mode::Search) {
-        let line = Line::from(vec![
-            Span::styled(" search: ", Style::default().fg(Color::Magenta).bold()),
             Span::styled(format!("{}_", app.rename_buf), Style::default().fg(Color::White)),
         ]);
         f.render_widget(Paragraph::new(line), area);
@@ -748,6 +815,9 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     }
     if matches!(app.mode, Mode::TreeNav) {
         spans.push(Span::styled(" [TREE]", Style::default().fg(Color::Cyan).bold()));
+    }
+    if matches!(app.mode, Mode::TreeSelect) {
+        spans.push(Span::styled(" [SAVE]", Style::default().fg(Color::Yellow).bold()));
     }
     if matches!(app.mode, Mode::Copy) {
         spans.push(Span::styled(
