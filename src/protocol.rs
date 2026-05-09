@@ -4,12 +4,6 @@ use std::collections::HashSet;
 pub type NodeId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LayoutMode {
-    Stacked,
-    Tiled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitDir {
     /// First on top, second on bottom
     Horizontal,
@@ -202,6 +196,11 @@ mod tests {
             first: Box::new(SplitTree::Leaf { pane_id: 0, window_id: 2 }),
             second: Box::new(SplitTree::Leaf { pane_id: 1, window_id: 3 }),
         };
+        let view = TiledViewEntry {
+            name: "view 1".into(),
+            split_tree: tree,
+            active_pane: Some(0),
+        };
         let msg = ServerMsg::TabState {
             projects: vec![TabEntry { id: 1, name: "proj".into(), ai_status: None }],
             groups: vec![],
@@ -209,21 +208,20 @@ mod tests {
             active_project: Some(1),
             active_group: None,
             active_window: None,
-            layout_mode: LayoutMode::Tiled,
-            split_tree: Some(tree),
-            active_pane: Some(0),
+            tiled_views: vec![view],
+            active_tiled_view: Some(0),
         };
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded: ServerMsg = serde_json::from_slice(&json).unwrap();
         match decoded {
-            ServerMsg::TabState { projects, active_project, layout_mode, split_tree, active_pane, .. } => {
+            ServerMsg::TabState { projects, active_project, tiled_views, active_tiled_view, .. } => {
                 assert_eq!(projects.len(), 1);
                 assert_eq!(projects[0].name, "proj");
                 assert_eq!(active_project, Some(1));
-                assert_eq!(layout_mode, LayoutMode::Tiled);
-                assert!(split_tree.is_some());
-                assert_eq!(split_tree.unwrap().leaves().len(), 2);
-                assert_eq!(active_pane, Some(0));
+                assert_eq!(active_tiled_view, Some(0));
+                assert_eq!(tiled_views.len(), 1);
+                assert_eq!(tiled_views[0].split_tree.leaves().len(), 2);
+                assert_eq!(tiled_views[0].active_pane, Some(0));
             }
             _ => panic!("wrong variant"),
         }
@@ -359,8 +357,14 @@ pub enum ClientMsg {
     MergeIntoMain,
     /// Close the active window
     CloseWindow,
-    /// Toggle group layout mode (Stacked ↔ Tiled)
-    ToggleLayout,
+    /// Create a new tiled view in the active group
+    CreateTiledView { name: Option<String> },
+    /// Select a tiled view by index in the active group
+    SelectTiledView { index: usize },
+    /// Delete a tiled view by index from the active group
+    DeleteTiledView { index: usize },
+    /// Rename a tiled view
+    RenameTiledView { index: usize, name: String },
     /// Split the active pane horizontally or vertically
     SplitPane { direction: SplitDir },
     /// Close the active pane (unsplit); sibling takes parent's place
@@ -410,9 +414,8 @@ pub enum ServerMsg {
         active_project: Option<NodeId>,
         active_group: Option<NodeId>,
         active_window: Option<NodeId>,
-        layout_mode: LayoutMode,
-        split_tree: Option<SplitTree>,
-        active_pane: Option<u32>,
+        tiled_views: Vec<TiledViewEntry>,
+        active_tiled_view: Option<usize>,
     },
     /// Error
     Error { message: String },
@@ -471,6 +474,14 @@ pub struct TreeWindow {
     pub ai_status: Option<crate::ai_detect::AiStatus>,
     /// Screen dump for preview (ANSI bytes)
     pub screen_data: Vec<u8>,
+}
+
+/// A tiled view entry (wire format, sent to clients)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TiledViewEntry {
+    pub name: String,
+    pub split_tree: SplitTree,
+    pub active_pane: Option<u32>,
 }
 
 /// Socket path

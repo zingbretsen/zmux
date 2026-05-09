@@ -70,6 +70,38 @@ async fn handle_normal_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
     Ok(())
 }
 
+/// Navigate left/right through the unified tiled-view + window list.
+async fn navigate_unified(app: &mut App, forward: bool) -> Result<()> {
+    let num_tiled = app.tiled_views.len();
+    let num_windows = app.windows.len();
+    let total = num_tiled + num_windows;
+    if total == 0 {
+        return Ok(());
+    }
+    let current_pos = if let Some(tv_idx) = app.active_tiled_view {
+        tv_idx
+    } else if let Some(wid) = app.active_window {
+        let win_idx = app.windows.iter().position(|e| e.id == wid).unwrap_or(0);
+        num_tiled + win_idx
+    } else {
+        num_tiled
+    };
+    let new_pos = if forward {
+        (current_pos + 1) % total
+    } else {
+        (current_pos + total - 1) % total
+    };
+    if new_pos < num_tiled {
+        app.conn.select_tiled_view(new_pos).await?;
+    } else {
+        let win_idx = new_pos - num_tiled;
+        if let Some(entry) = app.windows.get(win_idx) {
+            app.conn.select_window(entry.id).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -122,8 +154,20 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
                 TabLevel::Window => TabLevel::Window,
             };
         }
-        KeyCode::Char('h') | KeyCode::Left => app.prev_tab().await?,
-        KeyCode::Char('l') | KeyCode::Right => app.next_tab().await?,
+        KeyCode::Char('h') | KeyCode::Left => {
+            if app.tab_focus == TabLevel::Window {
+                navigate_unified(app, false).await?;
+            } else {
+                app.prev_tab().await?;
+            }
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            if app.tab_focus == TabLevel::Window {
+                navigate_unified(app, true).await?;
+            } else {
+                app.next_tab().await?;
+            }
+        }
 
         KeyCode::Char(c @ '1'..='9') => {
             let idx = (c as usize) - ('1' as usize);
@@ -131,7 +175,11 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
         }
 
         KeyCode::Char('x') => {
-            app.conn.close_window().await?;
+            if let Some(idx) = app.active_tiled_view {
+                app.conn.delete_tiled_view(idx).await?;
+            } else {
+                app.conn.close_window().await?;
+            }
         }
         KeyCode::Char('c') => {
             app.conn.new_window(None).await?;
@@ -144,23 +192,31 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.conn.move_window_to_new_project().await?;
         }
 
-        // Rename the focused tab
+        // Rename the focused tab (or active tiled view)
         KeyCode::Char('r') => {
-            let target = match app.tab_focus {
-                TabLevel::Project => app.active_project,
-                TabLevel::Group => app.active_group,
-                TabLevel::Window => app.active_window,
-            };
-            if let Some(id) = target {
-                // Pre-fill with current name
-                let current_name = match app.tab_focus {
-                    TabLevel::Project => app.projects.iter().find(|e| e.id == id).map(|e| e.name.clone()),
-                    TabLevel::Group => app.groups.iter().find(|e| e.id == id).map(|e| e.name.clone()),
-                    TabLevel::Window => app.windows.iter().find(|e| e.id == id).map(|e| e.name.clone()),
-                };
-                app.rename_buf = current_name.unwrap_or_default();
-                app.rename_target = Some(id);
+            if let Some(idx) = app.active_tiled_view {
+                let current_name = app.tiled_views.get(idx)
+                    .map(|v| v.name.clone())
+                    .unwrap_or_default();
+                app.rename_buf = current_name;
+                app.rename_tiled_view_index = Some(idx);
                 app.mode = Mode::Rename;
+            } else {
+                let target = match app.tab_focus {
+                    TabLevel::Project => app.active_project,
+                    TabLevel::Group => app.active_group,
+                    TabLevel::Window => app.active_window,
+                };
+                if let Some(id) = target {
+                    let current_name = match app.tab_focus {
+                        TabLevel::Project => app.projects.iter().find(|e| e.id == id).map(|e| e.name.clone()),
+                        TabLevel::Group => app.groups.iter().find(|e| e.id == id).map(|e| e.name.clone()),
+                        TabLevel::Window => app.windows.iter().find(|e| e.id == id).map(|e| e.name.clone()),
+                    };
+                    app.rename_buf = current_name.unwrap_or_default();
+                    app.rename_target = Some(id);
+                    app.mode = Mode::Rename;
+                }
             }
         }
 
@@ -301,9 +357,9 @@ async fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Resu
             app.mode = Mode::Help;
         }
 
-        // Toggle layout mode (Stacked ↔ Tiled)
+        // Create a new tiled view
         KeyCode::Char('t') => {
-            app.conn.toggle_layout().await?;
+            app.conn.create_tiled_view(None).await?;
         }
 
         // Split pane vertically (side by side)
@@ -371,6 +427,7 @@ async fn handle_rename_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
         KeyCode::Esc => {
             app.rename_buf.clear();
             app.rename_target = None;
+            app.rename_tiled_view_index = None;
             if from_tree {
                 app.mode = Mode::TreeNav;
             } else {
@@ -378,17 +435,25 @@ async fn handle_rename_key(app: &mut App, key: &crossterm::event::KeyEvent) -> R
             }
         }
         KeyCode::Enter => {
-            if let Some(id) = app.rename_target.take() {
+            if let Some(tv_idx) = app.rename_tiled_view_index.take() {
+                if !app.rename_buf.is_empty() {
+                    app.conn.rename_tiled_view(tv_idx, app.rename_buf.clone()).await?;
+                }
+                app.rename_buf.clear();
+                app.mode = Mode::Nav;
+            } else if let Some(id) = app.rename_target.take() {
                 if !app.rename_buf.is_empty() {
                     app.conn.rename(id, app.rename_buf.clone()).await?;
                 }
-            }
-            app.rename_buf.clear();
-            if from_tree {
-                // Refresh tree data and return to tree nav
-                app.conn.request_tree().await?;
-                app.mode = Mode::TreeNav;
+                app.rename_buf.clear();
+                if from_tree {
+                    app.conn.request_tree().await?;
+                    app.mode = Mode::TreeNav;
+                } else {
+                    app.mode = Mode::Nav;
+                }
             } else {
+                app.rename_buf.clear();
                 app.mode = Mode::Nav;
             }
         }
@@ -1750,6 +1815,9 @@ pub async fn handle_mouse(app: &mut App, mouse: &crossterm::event::MouseEvent) -
                             .unwrap_or(0);
                         app.mode = Mode::GroupPicker;
                         return Ok(());
+                    }
+                    ui::TabClick::TiledView(idx) => {
+                        app.conn.select_tiled_view(idx).await?;
                     }
                     ui::TabClick::Window(idx) => {
                         if let Some(entry) = app.windows.get(idx) {

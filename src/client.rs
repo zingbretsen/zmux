@@ -154,8 +154,20 @@ impl ClientConnection {
         self.send(ClientMsg::Detach).await
     }
 
-    pub async fn toggle_layout(&self) -> Result<()> {
-        self.send(ClientMsg::ToggleLayout).await
+    pub async fn create_tiled_view(&self, name: Option<String>) -> Result<()> {
+        self.send(ClientMsg::CreateTiledView { name }).await
+    }
+
+    pub async fn select_tiled_view(&self, index: usize) -> Result<()> {
+        self.send(ClientMsg::SelectTiledView { index }).await
+    }
+
+    pub async fn delete_tiled_view(&self, index: usize) -> Result<()> {
+        self.send(ClientMsg::DeleteTiledView { index }).await
+    }
+
+    pub async fn rename_tiled_view(&self, index: usize, name: String) -> Result<()> {
+        self.send(ClientMsg::RenameTiledView { index, name }).await
     }
 
     pub async fn split_pane(&self, direction: SplitDir) -> Result<()> {

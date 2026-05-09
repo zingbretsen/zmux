@@ -1,5 +1,5 @@
 use crate::app::{App, Mode, TabLevel, TreeItem, TreeNavPurpose, TriState};
-use crate::protocol::{LayoutMode, SplitDir, SplitTree};
+use crate::protocol::{SplitDir, SplitTree};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use std::time::Duration;
@@ -8,6 +8,7 @@ use tui_term::widget::PseudoTerminal;
 pub enum TabClick {
     Project,
     Group,
+    TiledView(usize),
     Window(usize),
 }
 
@@ -124,7 +125,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
  w       New worktree group X       Close group
  R       Rebase onto main   M       Merge into main
  e       Set env profile    E       Source env profile
- t       Toggle tiled       v       Vertical split
+ t       New tiled view     v       Vertical split
  -       Horizontal split   T       Swap split direction
  m       Close pane         n/N     Cycle pane (group)
  o/O     Cycle pane (all)
@@ -616,16 +617,16 @@ fn draw_tree_nav(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_tiled(f: &mut Frame, app: &App, area: Rect) {
-    if let Some(ref tree) = app.split_tree {
-        draw_split_node(f, app, tree, area);
+    if let Some(entry) = app.active_tiled_entry() {
+        draw_split_node(f, app, &entry.split_tree, entry.active_pane, area);
     }
 }
 
 /// Recursively render a split tree node
-fn draw_split_node(f: &mut Frame, app: &App, tree: &SplitTree, area: Rect) {
+fn draw_split_node(f: &mut Frame, app: &App, tree: &SplitTree, active_pane: Option<u32>, area: Rect) {
     match tree {
         SplitTree::Leaf { pane_id, window_id } => {
-            let is_active = app.active_pane == Some(*pane_id);
+            let is_active = active_pane == Some(*pane_id);
 
             let name = app.windows.iter()
                 .find(|e| e.id == *window_id)
@@ -674,8 +675,8 @@ fn draw_split_node(f: &mut Frame, app: &App, tree: &SplitTree, area: Rect) {
                 ])
                 .split(area);
 
-            draw_split_node(f, app, first, chunks[0]);
-            draw_split_node(f, app, second, chunks[1]);
+            draw_split_node(f, app, first, active_pane, chunks[0]);
+            draw_split_node(f, app, second, active_pane, chunks[1]);
         }
     }
 }
@@ -750,18 +751,24 @@ fn draw_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     spans.push(Span::styled(grp_name.to_string(), grp_style));
 
-    // Layout indicator
-    match app.layout_mode {
-        LayoutMode::Tiled => {
-            spans.push(Span::styled(
-                " [tiled]",
-                Style::default().fg(Color::Magenta).bold(),
-            ));
-        }
-        LayoutMode::Stacked => {}
-    }
-
     spans.push(Span::styled(" > ", Style::default().fg(Color::DarkGray)));
+
+    // Tiled view tabs
+    for (i, view) in app.tiled_views.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        }
+        let is_active_view = app.active_tiled_view == Some(i);
+        let style = if is_active_view {
+            Style::default().fg(Color::Black).bg(Color::Magenta).bold()
+        } else {
+            Style::default().fg(Color::Magenta)
+        };
+        spans.push(Span::styled(format!("[{}]", view.name), style));
+    }
+    if !app.tiled_views.is_empty() && !app.windows.is_empty() {
+        spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+    }
 
     // Windows - with horizontal scrolling to keep active tab visible
     let prefix_width: usize = spans.iter().map(|s| s.content.len()).sum();
@@ -879,20 +886,39 @@ pub fn tab_click_at(app: &App, col: u16) -> Option<TabClick> {
     }
     x += grp_span;
 
-    // Layout indicator — attribute to group
-    if app.layout_mode == LayoutMode::Tiled {
-        let layout_span = 8; // " [tiled]"
-        if col < x + layout_span {
-            return Some(TabClick::Group);
-        }
-        x += layout_span;
-    }
-
     // " > " separator — attribute to group
     if col < x + 3 {
         return Some(TabClick::Group);
     }
     x += 3;
+
+    // Tiled view tabs
+    let num_views = app.tiled_views.len();
+    for (i, view) in app.tiled_views.iter().enumerate() {
+        if i > 0 {
+            // " | " separator
+            if col >= x && col < x + 3 {
+                return if col < x + 2 {
+                    Some(TabClick::TiledView(i - 1))
+                } else {
+                    Some(TabClick::TiledView(i))
+                };
+            }
+            x += 3;
+        }
+        let tab_len = view.name.len() + 2; // "[name]"
+        if col >= x && col < x + tab_len {
+            return Some(TabClick::TiledView(i));
+        }
+        x += tab_len;
+    }
+    // Separator between tiled views and windows
+    if num_views > 0 && !app.windows.is_empty() {
+        if col >= x && col < x + 3 {
+            return Some(TabClick::TiledView(num_views - 1));
+        }
+        x += 3;
+    }
 
     // Windows — replicate visible_tab_range logic
     let nav = matches!(app.mode, Mode::Nav);

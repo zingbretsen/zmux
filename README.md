@@ -48,7 +48,7 @@ A replacement for tmux with specializations for cli-based AI tools, like Claude 
 | `/` | Open session tree in search mode (filter by project/group/window names and buffer content) |
 | `[` | Enter copy (scroll) mode |
 | `]` | Paste from copy buffer |
-| `t` | Toggle layout mode (Stacked ↔ Tiled) |
+| `t` | Create a new tiled view for the active group |
 | `v` | Split active pane vertically (side by side) |
 | `-` | Split active pane horizontally (top/bottom) |
 | `T` | Swap split direction (H↔V) at active pane |

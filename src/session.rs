@@ -1,11 +1,18 @@
 use crate::ai_detect::{self, AiStatus};
 use crate::config;
-use crate::protocol::{LayoutMode, NodeId, PaneDirection, ServerMsg, SplitDir, SplitTree, TabEntry, TreeGroup, TreeProject, TreeWindow};
+use crate::protocol::{NodeId, PaneDirection, ServerMsg, SplitDir, SplitTree, TabEntry, TiledViewEntry, TreeGroup, TreeProject, TreeWindow};
 use crate::pty::PtyHandle;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+
+pub(crate) struct TiledView {
+    pub(crate) name: String,
+    pub(crate) split_tree: SplitTree,
+    pub(crate) next_pane_id: u32,
+    pub(crate) active_pane: Option<u32>,
+}
 
 pub(crate) struct SessionTree {
     pub(crate) nodes: HashMap<NodeId, Node>,
@@ -32,14 +39,10 @@ pub(crate) struct GroupNode {
     pub(crate) working_dir: Option<PathBuf>,
     /// If this group was created from a git worktree, track it for cleanup
     pub(crate) worktree_path: Option<PathBuf>,
-    /// Layout mode: stacked (one visible) or tiled (multiple visible)
-    pub(crate) layout_mode: LayoutMode,
-    /// Binary split tree for tiled layout (None when in Stacked mode or not yet split)
-    pub(crate) split_tree: Option<SplitTree>,
-    /// Next pane ID to allocate
-    pub(crate) next_pane_id: u32,
-    /// Which pane is currently focused
-    pub(crate) active_pane: Option<u32>,
+    /// Named tiled layouts for this group
+    pub(crate) tiled_views: Vec<TiledView>,
+    /// Which tiled view is currently active (None = stacked mode)
+    pub(crate) active_tiled_view: Option<usize>,
     pub(crate) env_profile: Option<String>,
     pub(crate) layout_preset: Option<config::LayoutPreset>,
 }
@@ -132,10 +135,8 @@ impl SessionTree {
         let id = self.alloc_id();
         self.nodes.insert(id, Node::Group(GroupNode {
             name, parent, children: Vec::new(), working_dir, worktree_path,
-            layout_mode: LayoutMode::Stacked,
-            split_tree: None,
-            next_pane_id: 0,
-            active_pane: None,
+            tiled_views: Vec::new(),
+            active_tiled_view: None,
             env_profile: None,
             layout_preset: None,
         }));
@@ -240,28 +241,15 @@ impl SessionTree {
 
         self.nodes.remove(&window_id);
 
-        // Remove from parent group's children and split tree
+        // Remove from parent group's children and all tiled views
         if let Some(pid) = parent_id {
             if let Some(Node::Group(g)) = self.nodes.get_mut(&pid) {
                 g.children.retain(|id| *id != window_id);
-                // Remove from split tree if present
-                if let Some(tree) = g.split_tree.take() {
-                    g.split_tree = tree.remove_window(window_id);
-                    // If tree is gone, reset pane state
-                    if g.split_tree.is_none() {
-                        g.active_pane = None;
-                        g.layout_mode = LayoutMode::Stacked;
-                    } else if let Some(ap) = g.active_pane {
-                        // If active pane was removed, pick the first remaining leaf
-                        if g.split_tree.as_ref().unwrap().window_for_pane(ap).is_none() {
-                            g.active_pane = g.split_tree.as_ref().unwrap().leaves().first().map(|(pid, _)| *pid);
-                        }
-                    }
-                }
+                remove_window_from_tiled_views(g, window_id);
             }
         }
 
-        // Prune foreign split_trees that reference this window
+        // Prune foreign tiled views that reference this window
         let keys: Vec<NodeId> = self.nodes.keys().copied().collect();
         for node_id in keys {
             if Some(node_id) == parent_id {
@@ -269,21 +257,11 @@ impl SessionTree {
             }
             let has_ref = matches!(
                 self.nodes.get(&node_id),
-                Some(Node::Group(g)) if g.split_tree.as_ref().map(|t| t.window_ids().contains(&window_id)).unwrap_or(false)
+                Some(Node::Group(g)) if g.tiled_views.iter().any(|v| v.split_tree.window_ids().contains(&window_id))
             );
             if has_ref {
                 if let Some(Node::Group(g)) = self.nodes.get_mut(&node_id) {
-                    if let Some(tree) = g.split_tree.take() {
-                        g.split_tree = tree.remove_window(window_id);
-                        if g.split_tree.is_none() {
-                            g.active_pane = None;
-                            g.layout_mode = LayoutMode::Stacked;
-                        } else if let Some(ap) = g.active_pane {
-                            if g.split_tree.as_ref().unwrap().window_for_pane(ap).is_none() {
-                                g.active_pane = g.split_tree.as_ref().unwrap().leaves().first().map(|(pid, _)| *pid);
-                            }
-                        }
-                    }
+                    remove_window_from_tiled_views(g, window_id);
                 }
             }
         }
@@ -316,7 +294,7 @@ impl SessionTree {
             _ => return None,
         };
 
-        // Remove all windows in the group (cascades foreign split_tree cleanup)
+        // Remove all windows in the group (cascades foreign tiled_view cleanup)
         for wid in &window_ids {
             self.remove_window(*wid);
         }
@@ -465,14 +443,19 @@ impl SessionTree {
             } else { Vec::new() }
         } else { Vec::new() };
 
-        let (layout_mode, split_tree, active_pane) = if let Some(gid) = self.active_group {
+        let (tiled_views, active_tiled_view) = if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                (g.layout_mode, g.split_tree.clone(), g.active_pane)
+                let views: Vec<TiledViewEntry> = g.tiled_views.iter().map(|v| TiledViewEntry {
+                    name: v.name.clone(),
+                    split_tree: v.split_tree.clone(),
+                    active_pane: v.active_pane,
+                }).collect();
+                (views, g.active_tiled_view)
             } else {
-                (LayoutMode::Stacked, None, None)
+                (Vec::new(), None)
             }
         } else {
-            (LayoutMode::Stacked, None, None)
+            (Vec::new(), None)
         };
 
         ServerMsg::TabState {
@@ -480,7 +463,8 @@ impl SessionTree {
             active_project: self.active_project,
             active_group: self.active_group,
             active_window: self.active_window,
-            layout_mode, split_tree, active_pane,
+            tiled_views,
+            active_tiled_view,
         }
     }
 
@@ -501,8 +485,15 @@ impl SessionTree {
         self.active_group = Some(id);
         if let Some(Node::Group(g)) = self.nodes.get(&id) {
             self.active_project = Some(g.parent);
-            self.active_window = g.children.first().copied();
-        } else { self.active_window = None; }
+            // Restore active window from tiled view if one is active, else first child
+            let active_window = g.active_tiled_view
+                .and_then(|idx| g.tiled_views.get(idx))
+                .and_then(|v| v.active_pane.and_then(|ap| v.split_tree.window_for_pane(ap)))
+                .or_else(|| g.children.first().copied());
+            self.active_window = active_window;
+        } else {
+            self.active_window = None;
+        }
     }
 
     pub(crate) fn select_window(&mut self, id: NodeId) {
@@ -510,8 +501,17 @@ impl SessionTree {
         if let Some(Node::Window(w)) = self.nodes.get(&id) {
             let group_id = w.parent;
             self.active_group = Some(group_id);
-            if let Some(Node::Group(g)) = self.nodes.get(&group_id) {
-                self.active_project = Some(g.parent);
+            let project_id = if let Some(Node::Group(g)) = self.nodes.get(&group_id) {
+                Some(g.parent)
+            } else {
+                None
+            };
+            self.active_project = project_id;
+        }
+        // Clear active_tiled_view when navigating to a specific window
+        if let Some(gid) = self.active_group {
+            if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+                g.active_tiled_view = None;
             }
         }
     }
@@ -523,6 +523,132 @@ impl SessionTree {
             _ => None,
         }
     }
+
+    // ── Tiled view management ─────────────────────────────────────────────
+
+    /// Returns immutable ref to the active group's active tiled view.
+    pub(crate) fn active_tiled_view(&self) -> Option<&TiledView> {
+        let gid = self.active_group?;
+        if let Some(Node::Group(g)) = self.nodes.get(&gid) {
+            let idx = g.active_tiled_view?;
+            g.tiled_views.get(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Returns mutable ref to the active group's active tiled view.
+    pub(crate) fn active_tiled_view_mut(&mut self) -> Option<&mut TiledView> {
+        let gid = self.active_group?;
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            let idx = g.active_tiled_view?;
+            g.tiled_views.get_mut(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Creates a new tiled view in the active group containing a single leaf with active_window.
+    pub(crate) fn create_tiled_view(&mut self, name: Option<String>) {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return,
+        };
+        let wid = match self.active_window {
+            Some(wid) => wid,
+            None => return,
+        };
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if !g.children.contains(&wid) {
+                return;
+            }
+            let n = g.tiled_views.len();
+            let view_name = name.unwrap_or_else(|| format!("view {}", n + 1));
+            let view = TiledView {
+                name: view_name,
+                split_tree: SplitTree::Leaf { pane_id: 0, window_id: wid },
+                next_pane_id: 1,
+                active_pane: Some(0),
+            };
+            g.tiled_views.push(view);
+            g.active_tiled_view = Some(g.tiled_views.len() - 1);
+        }
+    }
+
+    /// Sets the active tiled view by index and updates active_window to the focused pane's window.
+    pub(crate) fn select_tiled_view(&mut self, index: usize) {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return,
+        };
+        let new_window = if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if index < g.tiled_views.len() {
+                g.active_tiled_view = Some(index);
+                let v = &g.tiled_views[index];
+                v.active_pane.and_then(|ap| v.split_tree.window_for_pane(ap))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(wid) = new_window {
+            self.active_window = Some(wid);
+        }
+    }
+
+    /// Removes a tiled view by index. Adjusts active_tiled_view.
+    pub(crate) fn delete_tiled_view(&mut self, index: usize) {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return,
+        };
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if index >= g.tiled_views.len() {
+                return;
+            }
+            g.tiled_views.remove(index);
+            g.active_tiled_view = match g.active_tiled_view {
+                Some(av) if av == index => None,
+                Some(av) if av > index => Some(av - 1),
+                other => other,
+            };
+        }
+    }
+
+    /// Renames a tiled view.
+    pub(crate) fn rename_tiled_view(&mut self, index: usize, name: String) {
+        let gid = match self.active_group {
+            Some(gid) => gid,
+            None => return,
+        };
+        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if let Some(view) = g.tiled_views.get_mut(index) {
+                view.name = name;
+            }
+        }
+    }
+
+    /// Toggle layout (kept for backward compat — now creates a tiled view).
+    pub(crate) fn toggle_layout(&mut self) {
+        // If there's already an active tiled view, deactivate it (go to stacked)
+        let already_tiled = if let Some(gid) = self.active_group {
+            matches!(self.nodes.get(&gid), Some(Node::Group(g)) if g.active_tiled_view.is_some())
+        } else {
+            false
+        };
+        if already_tiled {
+            if let Some(gid) = self.active_group {
+                if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+                    g.active_tiled_view = None;
+                }
+            }
+        } else {
+            self.create_tiled_view(None);
+        }
+    }
+
+    // ── Poll AI ───────────────────────────────────────────────────────────
 
     /// Poll all windows for AI tool processes. Returns true if any status changed.
     pub(crate) fn poll_ai_status(&mut self) -> bool {
@@ -600,29 +726,7 @@ impl SessionTree {
         true
     }
 
-    pub(crate) fn toggle_layout(&mut self) {
-        if let Some(gid) = self.active_group {
-            if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-                g.layout_mode = match g.layout_mode {
-                    LayoutMode::Stacked => {
-                        // Create a single-leaf tree if none exists
-                        if g.split_tree.is_none() {
-                            if let Some(wid) = self.active_window {
-                                if g.children.contains(&wid) {
-                                    let pane_id = g.next_pane_id;
-                                    g.next_pane_id += 1;
-                                    g.split_tree = Some(SplitTree::Leaf { pane_id, window_id: wid });
-                                    g.active_pane = Some(pane_id);
-                                }
-                            }
-                        }
-                        LayoutMode::Tiled
-                    }
-                    LayoutMode::Tiled => LayoutMode::Stacked,
-                };
-            }
-        }
-    }
+    // ── Split / pane operations ───────────────────────────────────────────
 
     /// Split the active pane in the given direction
     pub(crate) fn split_pane(&mut self, direction: SplitDir) {
@@ -630,21 +734,22 @@ impl SessionTree {
             Some(gid) => gid,
             None => return,
         };
+
         let active_pane = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled => {
-                match g.active_pane {
-                    Some(ap) => ap,
-                    None => return,
-                }
-            }
+            Some(Node::Group(g)) => g.active_tiled_view
+                .and_then(|idx| g.tiled_views.get(idx))
+                .and_then(|v| v.active_pane),
             _ => return,
         };
+        let active_pane = match active_pane {
+            Some(ap) => ap,
+            None => return,
+        };
 
-        // Get the current window for this pane
         let current_window = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) => {
-                g.split_tree.as_ref().and_then(|t| t.window_for_pane(active_pane))
-            }
+            Some(Node::Group(g)) => g.active_tiled_view
+                .and_then(|idx| g.tiled_views.get(idx))
+                .and_then(|v| v.split_tree.window_for_pane(active_pane)),
             _ => None,
         };
         let current_window = match current_window {
@@ -653,39 +758,40 @@ impl SessionTree {
         };
 
         if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            let new_pane_id = g.next_pane_id;
-            g.next_pane_id += 1;
+            if let Some(idx) = g.active_tiled_view {
+                if let Some(view) = g.tiled_views.get_mut(idx) {
+                    let new_pane_id = view.next_pane_id;
+                    view.next_pane_id += 1;
 
-            // Replace the active leaf with a split: original on first, new on second
-            fn split_at(tree: SplitTree, target: u32, direction: SplitDir, new_pane_id: u32, window_id: NodeId) -> SplitTree {
-                match tree {
-                    SplitTree::Leaf { pane_id, window_id: wid } if pane_id == target => {
-                        SplitTree::Split {
-                            direction,
-                            ratio: 0.5,
-                            first: Box::new(SplitTree::Leaf { pane_id, window_id: wid }),
-                            second: Box::new(SplitTree::Leaf { pane_id: new_pane_id, window_id }),
+                    fn split_at(tree: SplitTree, target: u32, direction: SplitDir, new_pane_id: u32, window_id: NodeId) -> SplitTree {
+                        match tree {
+                            SplitTree::Leaf { pane_id, window_id: wid } if pane_id == target => {
+                                SplitTree::Split {
+                                    direction,
+                                    ratio: 0.5,
+                                    first: Box::new(SplitTree::Leaf { pane_id, window_id: wid }),
+                                    second: Box::new(SplitTree::Leaf { pane_id: new_pane_id, window_id }),
+                                }
+                            }
+                            SplitTree::Split { direction: d, ratio, first, second } => {
+                                SplitTree::Split {
+                                    direction: d,
+                                    ratio,
+                                    first: Box::new(split_at(*first, target, direction, new_pane_id, window_id)),
+                                    second: Box::new(split_at(*second, target, direction, new_pane_id, window_id)),
+                                }
+                            }
+                            other => other,
                         }
                     }
-                    SplitTree::Split { direction: d, ratio, first, second } => {
-                        SplitTree::Split {
-                            direction: d,
-                            ratio,
-                            first: Box::new(split_at(*first, target, direction, new_pane_id, window_id)),
-                            second: Box::new(split_at(*second, target, direction, new_pane_id, window_id)),
-                        }
-                    }
-                    other => other,
+
+                    let old_tree = std::mem::replace(&mut view.split_tree, SplitTree::Leaf { pane_id: 0, window_id: 0 });
+                    view.split_tree = split_at(old_tree, active_pane, direction, new_pane_id, current_window);
+                    view.active_pane = Some(new_pane_id);
                 }
-            }
-
-            if let Some(tree) = g.split_tree.take() {
-                g.split_tree = Some(split_at(tree, active_pane, direction, new_pane_id, current_window));
-                g.active_pane = Some(new_pane_id);
             }
         }
 
-        // Update active_window to match the new pane's window
         self.active_window = Some(current_window);
     }
 
@@ -695,8 +801,11 @@ impl SessionTree {
             Some(gid) => gid,
             None => return,
         };
+
         let active_pane = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled => g.active_pane,
+            Some(Node::Group(g)) => g.active_tiled_view
+                .and_then(|idx| g.tiled_views.get(idx))
+                .and_then(|v| v.active_pane),
             _ => return,
         };
         let active_pane = match active_pane {
@@ -704,27 +813,43 @@ impl SessionTree {
             None => return,
         };
 
-        if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            if let Some(tree) = g.split_tree.take() {
-                match tree.remove_leaf(active_pane) {
-                    Some(new_tree) => {
-                        // Pick the first remaining leaf as the new active pane
-                        let new_active = new_tree.leaves().first().map(|(pid, _)| *pid);
-                        g.split_tree = Some(new_tree);
-                        g.active_pane = new_active;
-                        // Update active_window
-                        if let (Some(ap), Some(ref t)) = (g.active_pane, &g.split_tree) {
-                            self.active_window = t.window_for_pane(ap);
+        let new_active_window = if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
+            if let Some(idx) = g.active_tiled_view {
+                if let Some(view) = g.tiled_views.get_mut(idx) {
+                    let old_tree = std::mem::replace(&mut view.split_tree, SplitTree::Leaf { pane_id: 0, window_id: 0 });
+                    match old_tree.remove_leaf(active_pane) {
+                        Some(new_tree) => {
+                            let new_active = new_tree.leaves().first().map(|(pid, _)| *pid);
+                            let new_window = new_active.and_then(|ap| new_tree.window_for_pane(ap));
+                            view.split_tree = new_tree;
+                            view.active_pane = new_active;
+                            new_window
+                        }
+                        None => {
+                            // Last pane removed — delete this tiled view
+                            g.tiled_views.remove(idx);
+                            if let Some(av) = g.active_tiled_view {
+                                g.active_tiled_view = if g.tiled_views.is_empty() {
+                                    None
+                                } else {
+                                    Some(av.min(g.tiled_views.len() - 1))
+                                };
+                            }
+                            None
                         }
                     }
-                    None => {
-                        // Last pane removed, switch back to stacked
-                        g.split_tree = None;
-                        g.active_pane = None;
-                        g.layout_mode = LayoutMode::Stacked;
-                    }
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        } else {
+            None
+        };
+
+        if let Some(wid) = new_active_window {
+            self.active_window = Some(wid);
         }
     }
 
@@ -735,11 +860,12 @@ impl SessionTree {
             None => return,
         };
         if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            if g.layout_mode != LayoutMode::Tiled {
-                return;
-            }
-            if let (Some(ap), Some(ref mut tree)) = (g.active_pane, &mut g.split_tree) {
-                tree.swap_direction_at(ap);
+            if let Some(idx) = g.active_tiled_view {
+                if let Some(view) = g.tiled_views.get_mut(idx) {
+                    if let Some(ap) = view.active_pane {
+                        view.split_tree.swap_direction_at(ap);
+                    }
+                }
             }
         }
     }
@@ -752,9 +878,12 @@ impl SessionTree {
         };
 
         let (active_pane, children, tree_windows) = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && g.split_tree.is_some() => {
-                let tw: Vec<NodeId> = g.split_tree.as_ref().unwrap().window_ids();
-                (g.active_pane, g.children.clone(), tw)
+            Some(Node::Group(g)) if g.active_tiled_view.is_some() => {
+                let idx = g.active_tiled_view.unwrap();
+                match g.tiled_views.get(idx) {
+                    Some(v) => (v.active_pane, g.children.clone(), v.split_tree.window_ids()),
+                    None => return false,
+                }
             }
             _ => return false,
         };
@@ -764,7 +893,9 @@ impl SessionTree {
         };
 
         let current_window = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) => g.split_tree.as_ref().and_then(|t| t.window_for_pane(active_pane)),
+            Some(Node::Group(g)) => g.active_tiled_view
+                .and_then(|idx| g.tiled_views.get(idx))
+                .and_then(|v| v.split_tree.window_for_pane(active_pane)),
             _ => None,
         };
         let current_window = match current_window {
@@ -772,23 +903,19 @@ impl SessionTree {
             None => return false,
         };
 
-        // Find the current window's position in children
         let child_idx = match children.iter().position(|&id| id == current_window) {
             Some(i) => i,
             None => return false,
         };
 
-        // Find next/prev window not already shown in a pane
         let n = children.len();
         let mut replacement = None;
         for step in 1..n {
             let idx = if forward { (child_idx + step) % n } else { (child_idx + n - step) % n };
             let candidate = children[idx];
-            if !tree_windows.contains(&candidate) || candidate == current_window {
-                if !tree_windows.contains(&candidate) {
-                    replacement = Some(candidate);
-                    break;
-                }
+            if !tree_windows.contains(&candidate) {
+                replacement = Some(candidate);
+                break;
             }
         }
 
@@ -798,8 +925,10 @@ impl SessionTree {
         };
 
         if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            if let Some(ref mut tree) = g.split_tree {
-                tree.set_pane_window(active_pane, replacement);
+            if let Some(idx) = g.active_tiled_view {
+                if let Some(view) = g.tiled_views.get_mut(idx) {
+                    view.split_tree.set_pane_window(active_pane, replacement);
+                }
             }
         }
         self.active_window = Some(replacement);
@@ -814,7 +943,10 @@ impl SessionTree {
         };
 
         let active_pane = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && g.split_tree.is_some() => g.active_pane,
+            Some(Node::Group(g)) if g.active_tiled_view.is_some() => {
+                let idx = g.active_tiled_view.unwrap();
+                g.tiled_views.get(idx).and_then(|v| v.active_pane)
+            }
             _ => return false,
         };
         let active_pane = match active_pane {
@@ -823,7 +955,9 @@ impl SessionTree {
         };
 
         let current_window = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) => g.split_tree.as_ref().and_then(|t| t.window_for_pane(active_pane)),
+            Some(Node::Group(g)) => g.active_tiled_view
+                .and_then(|idx| g.tiled_views.get(idx))
+                .and_then(|v| v.split_tree.window_for_pane(active_pane)),
             _ => None,
         };
         let current_window = match current_window {
@@ -851,9 +985,11 @@ impl SessionTree {
             return false;
         }
 
-        // Get windows currently shown in the split tree
         let tree_windows: Vec<NodeId> = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) => g.split_tree.as_ref().map(|t| t.window_ids()).unwrap_or_default(),
+            Some(Node::Group(g)) => g.active_tiled_view
+                .and_then(|idx| g.tiled_views.get(idx))
+                .map(|v| v.split_tree.window_ids())
+                .unwrap_or_default(),
             _ => Vec::new(),
         };
 
@@ -875,8 +1011,10 @@ impl SessionTree {
         };
 
         if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            if let Some(ref mut tree) = g.split_tree {
-                tree.set_pane_window(active_pane, replacement);
+            if let Some(idx) = g.active_tiled_view {
+                if let Some(view) = g.tiled_views.get_mut(idx) {
+                    view.split_tree.set_pane_window(active_pane, replacement);
+                }
             }
         }
         self.active_window = Some(replacement);
@@ -884,33 +1022,44 @@ impl SessionTree {
     }
 
     /// Replace the active pane with the given window (must not already be in the split tree).
-    /// Returns false if preconditions not met.
     pub(crate) fn swap_active_pane_with(&mut self, window_id: NodeId) -> bool {
         let gid = match self.active_group {
             Some(gid) => gid,
             None => return false,
         };
+
         let active_pane = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && g.split_tree.is_some() => g.active_pane,
+            Some(Node::Group(g)) if g.active_tiled_view.is_some() => {
+                let idx = g.active_tiled_view.unwrap();
+                g.tiled_views.get(idx).and_then(|v| v.active_pane)
+            }
             _ => return false,
         };
         let active_pane = match active_pane {
             Some(ap) => ap,
             None => return false,
         };
+
         if !matches!(self.nodes.get(&window_id), Some(Node::Window(_))) {
             return false;
         }
+
         let already_in_tree = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) => g.split_tree.as_ref().map(|t| t.window_ids().contains(&window_id)).unwrap_or(false),
+            Some(Node::Group(g)) => g.active_tiled_view
+                .and_then(|idx| g.tiled_views.get(idx))
+                .map(|v| v.split_tree.window_ids().contains(&window_id))
+                .unwrap_or(false),
             _ => false,
         };
         if already_in_tree {
             return false;
         }
+
         if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            if let Some(ref mut tree) = g.split_tree {
-                tree.set_pane_window(active_pane, window_id);
+            if let Some(idx) = g.active_tiled_view {
+                if let Some(view) = g.tiled_views.get_mut(idx) {
+                    view.split_tree.set_pane_window(active_pane, window_id);
+                }
             }
         }
         self.active_window = Some(window_id);
@@ -923,26 +1072,26 @@ impl SessionTree {
             Some(gid) => gid,
             None => return,
         };
-        let active_pane = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) if g.layout_mode == LayoutMode::Tiled && g.split_tree.is_some() => g.active_pane,
+
+        let (active_pane, tree) = match self.nodes.get(&gid) {
+            Some(Node::Group(g)) if g.active_tiled_view.is_some() => {
+                let idx = g.active_tiled_view.unwrap();
+                match g.tiled_views.get(idx) {
+                    Some(v) => (v.active_pane, Some(v.split_tree.clone())),
+                    None => return,
+                }
+            }
             _ => return,
         };
         let active_pane = match active_pane {
             Some(ap) => ap,
             None => return,
         };
-
-        // Compute spatial rects for all leaves using a dummy area
-        let tree = match self.nodes.get(&gid) {
-            Some(Node::Group(g)) => g.split_tree.clone(),
-            _ => None,
-        };
         let tree = match tree {
             Some(t) => t,
             None => return,
         };
 
-        // Use a large dummy area; we only care about relative positions
         let rects = split_tree_rects(&tree, 0, 0, 1000, 1000);
 
         let current_rect = match rects.iter().find(|(pid, _, _, _, _)| *pid == active_pane) {
@@ -953,7 +1102,7 @@ impl SessionTree {
         let center_x = cx + cw / 2;
         let center_y = cy + ch / 2;
 
-        let mut best: Option<(u32, i32)> = None; // (pane_id, distance)
+        let mut best: Option<(u32, i32)> = None;
         for &(pid, rx, ry, rw, rh) in &rects {
             if pid == active_pane {
                 continue;
@@ -979,9 +1128,11 @@ impl SessionTree {
 
         if let Some((new_pane, _)) = best {
             if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-                g.active_pane = Some(new_pane);
-                if let Some(ref tree) = g.split_tree {
-                    self.active_window = tree.window_for_pane(new_pane);
+                if let Some(idx) = g.active_tiled_view {
+                    if let Some(view) = g.tiled_views.get_mut(idx) {
+                        view.active_pane = Some(new_pane);
+                        self.active_window = view.split_tree.window_for_pane(new_pane);
+                    }
                 }
             }
         }
@@ -994,26 +1145,27 @@ impl SessionTree {
             None => return,
         };
         if let Some(Node::Group(g)) = self.nodes.get_mut(&gid) {
-            if g.layout_mode != LayoutMode::Tiled {
-                return;
-            }
-            if let (Some(ap), Some(ref mut tree)) = (g.active_pane, &mut g.split_tree) {
-                let delta = match direction {
-                    PaneDirection::Right | PaneDirection::Down => 0.05,
-                    PaneDirection::Left | PaneDirection::Up => -0.05,
-                };
-                tree.adjust_ratio_at(ap, delta);
+            if let Some(idx) = g.active_tiled_view {
+                if let Some(view) = g.tiled_views.get_mut(idx) {
+                    if let Some(ap) = view.active_pane {
+                        let delta = match direction {
+                            PaneDirection::Right | PaneDirection::Down => 0.05,
+                            PaneDirection::Left | PaneDirection::Up => -0.05,
+                        };
+                        view.split_tree.adjust_ratio_at(ap, delta);
+                    }
+                }
             }
         }
     }
 
-    /// Returns true if the active group is in tiled mode and a window is in the split tree
+    /// Returns true if the active group has an active tiled view and the window is in it
     pub(crate) fn is_tiled_window(&self, window_id: NodeId) -> bool {
         if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                if g.layout_mode == LayoutMode::Tiled {
-                    if let Some(ref tree) = g.split_tree {
-                        return tree.window_ids().contains(&window_id);
+                if let Some(idx) = g.active_tiled_view {
+                    if let Some(view) = g.tiled_views.get(idx) {
+                        return view.split_tree.window_ids().contains(&window_id);
                     }
                 }
             }
@@ -1024,9 +1176,9 @@ impl SessionTree {
     pub(crate) fn active_tiled_windows(&self) -> Vec<NodeId> {
         if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                if g.layout_mode == LayoutMode::Tiled {
-                    if let Some(ref tree) = g.split_tree {
-                        return tree.window_ids();
+                if let Some(idx) = g.active_tiled_view {
+                    if let Some(view) = g.tiled_views.get(idx) {
+                        return view.split_tree.window_ids();
                     }
                 }
             }
@@ -1037,13 +1189,9 @@ impl SessionTree {
     pub(crate) fn resize_all(&mut self, rows: u16, cols: u16) -> Result<()> {
         let tiled_sizes: Option<Vec<(u32, NodeId, u16, u16)>> = if let Some(gid) = self.active_group {
             if let Some(Node::Group(g)) = self.nodes.get(&gid) {
-                if g.layout_mode == LayoutMode::Tiled {
-                    g.split_tree.as_ref().map(|tree| {
-                        split_tree_pane_sizes(tree, rows, cols)
-                    })
-                } else {
-                    None
-                }
+                g.active_tiled_view
+                    .and_then(|idx| g.tiled_views.get(idx))
+                    .map(|view| split_tree_pane_sizes(&view.split_tree, rows, cols))
             } else {
                 None
             }
@@ -1154,8 +1302,7 @@ impl SessionTree {
     }
 
     /// Convert current session tree to a Preset, optionally including only windows
-    /// whose IDs appear in `include`. Groups with no included windows are dropped;
-    /// projects with no remaining groups are dropped.
+    /// whose IDs appear in `include`.
     pub(crate) fn to_preset_filtered(
         &self,
         include: Option<&std::collections::HashSet<NodeId>>,
@@ -1279,6 +1426,38 @@ impl SessionTree {
     }
 }
 
+/// Helper: remove a window from all tiled views in a group, deleting views that become empty.
+fn remove_window_from_tiled_views(g: &mut GroupNode, window_id: NodeId) {
+    let mut views_to_remove = Vec::new();
+    for (i, view) in g.tiled_views.iter_mut().enumerate() {
+        let old_tree = std::mem::replace(&mut view.split_tree, SplitTree::Leaf { pane_id: 0, window_id: 0 });
+        match old_tree.remove_window(window_id) {
+            Some(new_tree) => {
+                view.split_tree = new_tree;
+                if let Some(ap) = view.active_pane {
+                    if view.split_tree.window_for_pane(ap).is_none() {
+                        view.active_pane = view.split_tree.leaves().first().map(|(pid, _)| *pid);
+                    }
+                }
+            }
+            None => {
+                views_to_remove.push(i);
+            }
+        }
+    }
+    // Remove empty views in reverse order to preserve indices
+    for i in views_to_remove.into_iter().rev() {
+        g.tiled_views.remove(i);
+        if let Some(av) = g.active_tiled_view {
+            if av == i {
+                g.active_tiled_view = None;
+            } else if av > i {
+                g.active_tiled_view = Some(av - 1);
+            }
+        }
+    }
+}
+
 /// Build a split tree from a list of (pane_id, window_id) pairs and a named layout preset.
 pub(crate) fn build_layout_tree(
     windows: &[(u32, NodeId)],
@@ -1356,28 +1535,29 @@ fn build_even_split_from_trees(trees: &[SplitTree], dir: SplitDir) -> SplitTree 
 }
 
 /// Compute pane sizes for a split tree. Returns (pane_id, window_id, rows, cols) for each leaf.
+/// Sizes are inner sizes after Borders::ALL (subtracts 2 rows and 2 cols per leaf).
 pub(crate) fn split_tree_pane_sizes(tree: &SplitTree, total_rows: u16, total_cols: u16) -> Vec<(u32, NodeId, u16, u16)> {
     let mut result = Vec::new();
     fn walk(tree: &SplitTree, rows: u16, cols: u16, result: &mut Vec<(u32, NodeId, u16, u16)>) {
         match tree {
             SplitTree::Leaf { pane_id, window_id } => {
-                result.push((*pane_id, *window_id, rows, cols));
+                // Subtract 2 for Borders::ALL (left+right border, top+bottom border)
+                let inner_rows = rows.saturating_sub(2);
+                let inner_cols = cols.saturating_sub(2);
+                result.push((*pane_id, *window_id, inner_rows, inner_cols));
             }
             SplitTree::Split { direction, ratio, first, second } => {
+                let ratio_u32 = (*ratio * 1000.0).round() as u32;
                 match direction {
                     SplitDir::Vertical => {
-                        // Split columns: first gets ratio*cols, second gets rest (minus 1 for border)
-                        let usable = cols.saturating_sub(1); // 1 col for border
-                        let first_cols = ((usable as f64) * ratio).round() as u16;
-                        let second_cols = usable.saturating_sub(first_cols);
+                        let first_cols = ((cols as u32 * ratio_u32) / 1000) as u16;
+                        let second_cols = cols.saturating_sub(first_cols);
                         walk(first, rows, first_cols, result);
                         walk(second, rows, second_cols, result);
                     }
                     SplitDir::Horizontal => {
-                        // Split rows: first gets ratio*rows, second gets rest (minus 1 for border)
-                        let usable = rows.saturating_sub(1);
-                        let first_rows = ((usable as f64) * ratio).round() as u16;
-                        let second_rows = usable.saturating_sub(first_rows);
+                        let first_rows = ((rows as u32 * ratio_u32) / 1000) as u16;
+                        let second_rows = rows.saturating_sub(first_rows);
                         walk(first, first_rows, cols, result);
                         walk(second, second_rows, cols, result);
                     }
@@ -1427,7 +1607,8 @@ mod tests {
     fn split_tree_pane_sizes_single() {
         let tree = SplitTree::Leaf { pane_id: 0, window_id: 1 };
         let result = split_tree_pane_sizes(&tree, 24, 80);
-        assert_eq!(result, vec![(0, 1, 24, 80)]);
+        // Inner size after Borders::ALL: 24-2=22 rows, 80-2=78 cols
+        assert_eq!(result, vec![(0, 1, 22, 78)]);
     }
 
     #[test]
@@ -1438,12 +1619,14 @@ mod tests {
             first: Box::new(SplitTree::Leaf { pane_id: 0, window_id: 1 }),
             second: Box::new(SplitTree::Leaf { pane_id: 1, window_id: 2 }),
         };
-        let result = split_tree_pane_sizes(&tree, 24, 81);
+        let result = split_tree_pane_sizes(&tree, 24, 80);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].2, 24); // full rows
-        assert_eq!(result[1].2, 24);
-        // 81 - 1 border = 80, 50% = 40 each
-        assert_eq!(result[0].3 + result[1].3, 80);
+        // rows: each leaf gets 24 rows outer → 22 inner
+        assert_eq!(result[0].2, 22);
+        assert_eq!(result[1].2, 22);
+        // cols: ratio=0.5, total=80 → first=40, second=40; inner: 40-2=38 each
+        assert_eq!(result[0].3, 38);
+        assert_eq!(result[1].3, 38);
     }
 
     #[test]
@@ -1454,11 +1637,14 @@ mod tests {
             first: Box::new(SplitTree::Leaf { pane_id: 0, window_id: 1 }),
             second: Box::new(SplitTree::Leaf { pane_id: 1, window_id: 2 }),
         };
-        let result = split_tree_pane_sizes(&tree, 25, 80);
+        let result = split_tree_pane_sizes(&tree, 24, 80);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].3, 80); // full cols
-        assert_eq!(result[1].3, 80);
-        assert_eq!(result[0].2 + result[1].2, 24); // 25 - 1 border
+        // cols: each leaf gets 80 outer → 78 inner
+        assert_eq!(result[0].3, 78);
+        assert_eq!(result[1].3, 78);
+        // rows: ratio=0.5, total=24 → first=12, second=12; inner: 12-2=10 each
+        assert_eq!(result[0].2, 10);
+        assert_eq!(result[1].2, 10);
     }
 }
 

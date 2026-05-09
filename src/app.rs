@@ -1,5 +1,5 @@
 use crate::client::ClientConnection;
-use crate::protocol::{LayoutMode, NodeId, ServerMsg, SplitTree, TabEntry, TreeProject};
+use crate::protocol::{NodeId, ServerMsg, TabEntry, TiledViewEntry, TreeProject};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -79,10 +79,12 @@ pub struct App {
     pub active_group: Option<NodeId>,
     pub active_window: Option<NodeId>,
 
-    // Layout state
-    pub layout_mode: LayoutMode,
-    pub split_tree: Option<SplitTree>,
-    pub active_pane: Option<u32>,
+    // Tiled view state
+    pub tiled_views: Vec<TiledViewEntry>,
+    pub active_tiled_view: Option<usize>,
+
+    // Rename index for tiled view rename mode
+    pub rename_tiled_view_index: Option<usize>,
 
     // Client-side vt100 parsers keyed by window ID
     pub parsers: HashMap<NodeId, Arc<Mutex<vt100::Parser>>>,
@@ -172,9 +174,9 @@ impl App {
             active_project: None,
             active_group: None,
             active_window: None,
-            layout_mode: LayoutMode::Stacked,
-            split_tree: None,
-            active_pane: None,
+            tiled_views: Vec::new(),
+            active_tiled_view: None,
+            rename_tiled_view_index: None,
             parsers: HashMap::new(),
             term_rows,
             term_cols,
@@ -230,16 +232,15 @@ impl App {
 
     pub fn apply_server_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::TabState { projects, groups, windows, active_project, active_group, active_window, layout_mode, split_tree, active_pane } => {
+            ServerMsg::TabState { projects, groups, windows, active_project, active_group, active_window, tiled_views, active_tiled_view } => {
                 self.projects = projects;
                 self.groups = groups;
                 self.windows = windows;
                 self.active_project = active_project;
                 self.active_group = active_group;
                 self.active_window = active_window;
-                self.layout_mode = layout_mode;
-                self.split_tree = split_tree;
-                self.active_pane = active_pane;
+                self.tiled_views = tiled_views;
+                self.active_tiled_view = active_tiled_view;
 
                 // Clean up parsers for windows that no longer exist
                 let window_ids: HashSet<NodeId> = self.windows.iter().map(|e| e.id).collect();
@@ -334,7 +335,11 @@ impl App {
     }
 
     pub fn is_tiled(&self) -> bool {
-        self.layout_mode == LayoutMode::Tiled && self.split_tree.is_some()
+        self.active_tiled_view.is_some()
+    }
+
+    pub fn active_tiled_entry(&self) -> Option<&TiledViewEntry> {
+        self.active_tiled_view.and_then(|i| self.tiled_views.get(i))
     }
 
     // Tab navigation helpers
@@ -467,7 +472,9 @@ impl App {
 
         // In swap mode, collect which window IDs are already visible in the active split_tree
         let excluded_ids: std::collections::HashSet<NodeId> = if self.tree_nav_purpose == TreeNavPurpose::SwapPane {
-            self.split_tree.as_ref().map(|t| t.window_ids().into_iter().collect()).unwrap_or_default()
+            self.active_tiled_entry()
+                .map(|v| v.split_tree.window_ids().into_iter().collect())
+                .unwrap_or_default()
         } else {
             std::collections::HashSet::new()
         };

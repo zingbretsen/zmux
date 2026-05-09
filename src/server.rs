@@ -1,7 +1,7 @@
 use crate::config;
-use crate::protocol::{self, ClientMsg, LayoutMode, NodeId, ServerMsg};
+use crate::protocol::{self, ClientMsg, NodeId, ServerMsg};
 use crate::pty::PtyHandle;
-use crate::session::{build_layout_tree, GroupNode, Node, ProjectNode, SessionTree, WindowNode};
+use crate::session::{build_layout_tree, GroupNode, Node, ProjectNode, SessionTree, TiledView, WindowNode};
 use crate::worktree;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,14 @@ struct SerializedSession {
 }
 
 #[derive(Serialize, Deserialize)]
+struct SerializedTiledView {
+    name: String,
+    split_tree: protocol::SplitTree,
+    next_pane_id: u32,
+    active_pane: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
 enum SerializedNode {
     Project {
         name: String,
@@ -75,10 +83,8 @@ enum SerializedNode {
         children: Vec<NodeId>,
         working_dir: Option<String>,
         worktree_path: Option<String>,
-        layout_mode: LayoutMode,
-        split_tree: Option<protocol::SplitTree>,
-        next_pane_id: u32,
-        active_pane: Option<u32>,
+        tiled_views: Vec<SerializedTiledView>,
+        active_tiled_view: Option<usize>,
         #[serde(default)]
         env_profile: Option<String>,
         #[serde(default)]
@@ -358,19 +364,25 @@ pub async fn run_server(preset_name: Option<&str>) -> Result<()> {
                 if let Some(ref layout) = grp_preset.layout {
                     if let Some(Node::Group(g)) = session.nodes.get_mut(&group_id) {
                         let window_ids: Vec<NodeId> = g.children.clone();
-                        if window_ids.len() > 1 {
+                        let split_tree = if window_ids.len() > 1 {
                             let panes: Vec<(u32, NodeId)> = window_ids.iter().enumerate()
                                 .map(|(i, &wid)| (i as u32, wid)).collect();
-                            g.layout_mode = LayoutMode::Tiled;
-                            g.split_tree = build_layout_tree(&panes, layout);
-                            g.next_pane_id = panes.len() as u32;
-                            g.active_pane = Some(0);
-                            g.layout_preset = Some(layout.clone());
+                            let tree = build_layout_tree(&panes, layout);
+                            let n = panes.len() as u32;
+                            tree.map(|t| (t, n))
                         } else if window_ids.len() == 1 {
-                            g.layout_mode = LayoutMode::Tiled;
-                            g.split_tree = Some(protocol::SplitTree::Leaf { pane_id: 0, window_id: window_ids[0] });
-                            g.next_pane_id = 1;
-                            g.active_pane = Some(0);
+                            Some((protocol::SplitTree::Leaf { pane_id: 0, window_id: window_ids[0] }, 1))
+                        } else {
+                            None
+                        };
+                        if let Some((tree, next_pane_id)) = split_tree {
+                            g.tiled_views.push(TiledView {
+                                name: format!("{:?}", layout),
+                                split_tree: tree,
+                                next_pane_id,
+                                active_pane: Some(0),
+                            });
+                            g.active_tiled_view = Some(g.tiled_views.len() - 1);
                             g.layout_preset = Some(layout.clone());
                         }
                     }
@@ -538,10 +550,13 @@ fn serialize_state(
                     .worktree_path
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
-                layout_mode: g.layout_mode,
-                split_tree: g.split_tree.clone(),
-                next_pane_id: g.next_pane_id,
-                active_pane: g.active_pane,
+                tiled_views: g.tiled_views.iter().map(|v| SerializedTiledView {
+                    name: v.name.clone(),
+                    split_tree: v.split_tree.clone(),
+                    next_pane_id: v.next_pane_id,
+                    active_pane: v.active_pane,
+                }).collect(),
+                active_tiled_view: g.active_tiled_view,
                 env_profile: g.env_profile.clone(),
                 layout_preset: g.layout_preset.clone(),
             },
@@ -717,10 +732,8 @@ fn restore_session(
                 children,
                 working_dir,
                 worktree_path,
-                layout_mode,
-                split_tree,
-                next_pane_id,
-                active_pane,
+                tiled_views,
+                active_tiled_view,
                 env_profile,
                 layout_preset,
             } => Node::Group(GroupNode {
@@ -729,10 +742,13 @@ fn restore_session(
                 children,
                 working_dir: working_dir.map(PathBuf::from),
                 worktree_path: worktree_path.map(PathBuf::from),
-                layout_mode,
-                split_tree,
-                next_pane_id,
-                active_pane,
+                tiled_views: tiled_views.into_iter().map(|v| TiledView {
+                    name: v.name,
+                    split_tree: v.split_tree,
+                    next_pane_id: v.next_pane_id,
+                    active_pane: v.active_pane,
+                }).collect(),
+                active_tiled_view,
                 env_profile,
                 layout_preset,
             }),
@@ -1157,19 +1173,25 @@ async fn handle_client(
                                 if let Some(ref layout) = grp_preset.layout {
                                     if let Some(Node::Group(g)) = st.session.nodes.get_mut(&group_id) {
                                         let window_ids: Vec<NodeId> = g.children.clone();
-                                        if window_ids.len() > 1 {
+                                        let split_tree = if window_ids.len() > 1 {
                                             let panes: Vec<(u32, NodeId)> = window_ids.iter().enumerate()
                                                 .map(|(i, &wid)| (i as u32, wid)).collect();
-                                            g.layout_mode = LayoutMode::Tiled;
-                                            g.split_tree = crate::session::build_layout_tree(&panes, layout);
-                                            g.next_pane_id = panes.len() as u32;
-                                            g.active_pane = Some(0);
-                                            g.layout_preset = Some(layout.clone());
+                                            let tree = build_layout_tree(&panes, layout);
+                                            let n = panes.len() as u32;
+                                            tree.map(|t| (t, n))
                                         } else if window_ids.len() == 1 {
-                                            g.layout_mode = LayoutMode::Tiled;
-                                            g.split_tree = Some(protocol::SplitTree::Leaf { pane_id: 0, window_id: window_ids[0] });
-                                            g.next_pane_id = 1;
-                                            g.active_pane = Some(0);
+                                            Some((protocol::SplitTree::Leaf { pane_id: 0, window_id: window_ids[0] }, 1))
+                                        } else {
+                                            None
+                                        };
+                                        if let Some((tree, next_pane_id)) = split_tree {
+                                            g.tiled_views.push(TiledView {
+                                                name: format!("{:?}", layout),
+                                                split_tree: tree,
+                                                next_pane_id,
+                                                active_pane: Some(0),
+                                            });
+                                            g.active_tiled_view = Some(g.tiled_views.len() - 1);
                                             g.layout_preset = Some(layout.clone());
                                         }
                                     }
@@ -1638,11 +1660,10 @@ async fn handle_client(
                     }
                 }
             }
-            ClientMsg::ToggleLayout => {
-                st.session.toggle_layout();
+            ClientMsg::CreateTiledView { name } => {
+                st.session.create_tiled_view(name);
                 let (cols, rows) = st.effective_size();
                 let term_rows = rows.saturating_sub(1);
-                let cols = cols;
                 if let Err(e) = st.session.resize_all(term_rows, cols) {
                     warn!("resize_all failed: {}", e);
                 }
@@ -1650,20 +1671,54 @@ async fn handle_client(
                 st.broadcast(tab);
                 for wid in st.session.active_tiled_windows() {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        st.broadcast(ServerMsg::ScreenDump {
-                            window_id: wid,
-                            data,
-                        });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
                 if let Some(wid) = st.session.active_window {
                     if let Some(data) = st.session.screen_dump(wid) {
-                        st.broadcast(ServerMsg::ScreenDump {
-                            window_id: wid,
-                            data,
-                        });
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
                     }
                 }
+            }
+            ClientMsg::SelectTiledView { index } => {
+                st.session.select_tiled_view(index);
+                let (cols, rows) = st.effective_size();
+                let term_rows = rows.saturating_sub(1);
+                if let Err(e) = st.session.resize_all(term_rows, cols) {
+                    warn!("resize_all failed: {}", e);
+                }
+                let tab = st.session.tab_state();
+                st.broadcast(tab);
+                for wid in st.session.active_tiled_windows() {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
+                    }
+                }
+                if let Some(wid) = st.session.active_window {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
+                    }
+                }
+            }
+            ClientMsg::DeleteTiledView { index } => {
+                st.session.delete_tiled_view(index);
+                let (cols, rows) = st.effective_size();
+                let term_rows = rows.saturating_sub(1);
+                if let Err(e) = st.session.resize_all(term_rows, cols) {
+                    warn!("resize_all failed: {}", e);
+                }
+                let tab = st.session.tab_state();
+                st.broadcast(tab);
+                if let Some(wid) = st.session.active_window {
+                    if let Some(data) = st.session.screen_dump(wid) {
+                        st.broadcast(ServerMsg::ScreenDump { window_id: wid, data });
+                    }
+                }
+            }
+            ClientMsg::RenameTiledView { index, name } => {
+                st.session.rename_tiled_view(index, name);
+                let tab = st.session.tab_state();
+                st.broadcast(tab);
             }
             ClientMsg::SplitPane { direction } => {
                 st.session.split_pane(direction);
